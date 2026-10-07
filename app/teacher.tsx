@@ -13,6 +13,7 @@ import {
   Platform,
   Modal,
   KeyboardAvoidingView,
+  useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -60,24 +61,80 @@ interface LessonGroup {
   lessons: Lesson[];
 }
 
+const getStoryGrammarBadge = (index: number) => {
+  switch (index % 4) {
+    case 0:
+      return {
+        label: "Character & Setting",
+        icon: "person-outline" as const,
+        color: "#7C3AED",
+        bgColor: "#EDE9FE",
+      };
+    case 1:
+      return {
+        label: "Problem & Challenge",
+        icon: "alert-circle-outline" as const,
+        color: "#D97706",
+        bgColor: "#FEF3C7",
+      };
+    case 2:
+      return {
+        label: "Action & Rules",
+        icon: "build-outline" as const,
+        color: "#4F46E5",
+        bgColor: "#EEF2FF",
+      };
+    default:
+      return {
+        label: "Resolution & Outcome",
+        icon: "checkmark-circle-outline" as const,
+        color: "#059669",
+        bgColor: "#D1FAE5",
+      };
+  }
+};
+
+const resolveImageUrl = (url?: string): string => {
+  if (!url) return '';
+  // Normalize any hardcoded IP or localhost to current active API_URL
+  if (url.includes('/static/')) {
+    const filename = url.substring(url.indexOf('/static/'));
+    return `${API_URL}${filename}`;
+  }
+  return url;
+};
+
 export default function TeacherDashboardScreen() {
   const { user, logout } = useAuth();
+  const { width: windowWidth } = useWindowDimensions();
+  const isDesktop = windowWidth >= 1000;
 
   const [activeTab, setActiveTab] = useState<'current' | 'lessons' | 'quizzes' | 'analytics'>('current');
   const [selectedTopicId, setSelectedTopicId] = useState('story-grammar');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showStudentPreview, setShowStudentPreview] = useState(false);
+  const [showModalStudentPreview, setShowModalStudentPreview] = useState(false);
 
   // Lessons State
   const [lessonGroups, setLessonGroups] = useState<LessonGroup[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(false);
+  const [expandedStoryIds, setExpandedStoryIds] = useState<number[]>([]);
+
+  const toggleStoryExpand = (groupId: number) => {
+    setExpandedStoryIds((prev) =>
+      prev.includes(groupId) ? prev.filter((id) => id !== groupId) : [...prev, groupId]
+    );
+  };
   const [lessonGroupName, setLessonGroupName] = useState('');
   const [difficulty, setDifficulty] = useState<'easy' | 'medium' | 'hard'>('easy');
   const [descriptions, setDescriptions] = useState<Slide[]>([{ description_text: '', image_url: '' }]);
+  const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [submittingLesson, setSubmittingLesson] = useState(false);
 
   // Edit Lesson Slides Modal
   const [editingLesson, setEditingLesson] = useState<{ id: number; groupTitle: string; difficulty: string } | null>(null);
   const [editSlides, setEditSlides] = useState<Slide[]>([]);
+  const [activeEditSlideIndex, setActiveEditSlideIndex] = useState(0);
   const [savingEditSlides, setSavingEditSlides] = useState(false);
 
   // Edit Quiz Modal
@@ -119,6 +176,26 @@ export default function TeacherDashboardScreen() {
   // Analytics State
   const [analyticsData, setAnalyticsData] = useState<any>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+  const [selectedStudentForInspect, setSelectedStudentForInspect] = useState<any>(null);
+  const [studentQuizAttempts, setStudentQuizAttempts] = useState<any[]>([]);
+  const [studentKcMastery, setStudentKcMastery] = useState<any[]>([]);
+  const [studentBadges, setStudentBadges] = useState<any[]>([]);
+  const [loadingStudentDetails, setLoadingStudentDetails] = useState<boolean>(false);
+  const [studentDossierTab, setStudentDossierTab] = useState<'attempts' | 'mastery' | 'badges'>('attempts');
+  const [studentAttemptFilter, setStudentAttemptFilter] = useState<'all' | 'passed' | 'review'>('all');
+  const [searchStudentQuery, setSearchStudentQuery] = useState<string>('');
+  const [studentSortBy, setStudentSortBy] = useState<'stars' | 'attempts' | 'needs_support'>('stars');
+
+  // Pulse & Readiness Metrics
+  const totalStories = lessonGroups.length;
+  const totalTiers = lessonGroups.reduce((acc, g) => acc + (g.lessons?.length || 0), 0);
+  const storiesNeedingQuizzes = lessonGroups.filter((g) =>
+    (g.lessons || []).some((l) => !l.quiz_id)
+  );
+  const completeStories = lessonGroups.filter((g) => {
+    const tiers = ['easy', 'medium', 'hard'];
+    return tiers.every((t) => (g.lessons || []).some((l) => l.difficulty === t && l.quiz_id));
+  });
 
   const topics = [
     { id: 'story-grammar', name: 'Story Grammar', icon: 'book-outline' as const },
@@ -147,7 +224,16 @@ export default function TeacherDashboardScreen() {
       const res = await fetch(`${API_URL}/admin/lesson-groups/${topicId}`);
       if (!res.ok) throw new Error('Failed to fetch lesson groups');
       const data = await res.json();
-      setLessonGroups(data);
+      const sorted = Array.isArray(data)
+        ? [...data].sort((a, b) => {
+            if (b.created_at && a.created_at) {
+              const diff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+              if (diff !== 0) return diff;
+            }
+            return (b.id || 0) - (a.id || 0);
+          })
+        : [];
+      setLessonGroups(sorted);
     } catch {
       // Offline fallback
       setLessonGroups([]);
@@ -222,6 +308,49 @@ export default function TeacherDashboardScreen() {
     }
   }, []);
 
+  // Fetch Student Analytics Deep-Dive
+  const handleInspectStudent = useCallback(async (student: any) => {
+    setSelectedStudentForInspect(student);
+    setLoadingStudentDetails(true);
+    setStudentDossierTab('attempts');
+    setStudentAttemptFilter('all');
+    try {
+      const studentId = student.user_id || student.id;
+      const [attemptsRes, masteryRes, badgesRes] = await Promise.all([
+        fetch(`${API_URL}/teacher/student/${studentId}/quiz-attempts`),
+        fetch(`${API_URL}/student/${studentId}/kc-mastery`),
+        fetch(`${API_URL}/student/${studentId}/badges`),
+      ]);
+
+      if (attemptsRes.ok) {
+        const attemptsData = await attemptsRes.json();
+        setStudentQuizAttempts(attemptsData.attempts || []);
+      } else {
+        setStudentQuizAttempts([]);
+      }
+
+      if (masteryRes.ok) {
+        const masteryData = await masteryRes.json();
+        setStudentKcMastery(Array.isArray(masteryData) ? masteryData : []);
+      } else {
+        setStudentKcMastery([]);
+      }
+
+      if (badgesRes.ok) {
+        const badgesData = await badgesRes.json();
+        setStudentBadges(badgesData.badges || (Array.isArray(badgesData) ? badgesData : []));
+      } else {
+        setStudentBadges([]);
+      }
+    } catch {
+      setStudentQuizAttempts([]);
+      setStudentKcMastery([]);
+      setStudentBadges([]);
+    } finally {
+      setLoadingStudentDetails(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchLessonGroups(selectedTopicId);
     fetchQuizzes(selectedTopicId);
@@ -253,7 +382,12 @@ export default function TeacherDashboardScreen() {
         if (Platform.OS === 'web') {
           const response = await fetch(uri);
           const blob = await response.blob();
-          formData.append('file', blob, filename);
+          let ext = '.jpg';
+          if (blob.type === 'image/png') ext = '.png';
+          else if (blob.type === 'image/gif') ext = '.gif';
+          else if (blob.type === 'image/webp') ext = '.webp';
+          const safeFilename = filename.includes('.') ? filename : `upload_${Date.now()}${ext}`;
+          formData.append('file', blob, safeFilename);
         } else {
           formData.append('file', { uri, name: filename, type } as any);
         }
@@ -407,6 +541,7 @@ export default function TeacherDashboardScreen() {
   const handleOpenEditSlides = (lesson: Lesson, groupTitle: string) => {
     setEditingLesson({ id: lesson.id, groupTitle, difficulty: lesson.difficulty });
     setEditSlides((lesson.slides && lesson.slides.length > 0) ? JSON.parse(JSON.stringify(lesson.slides)) : [{ description_text: '', image_url: '' }]);
+    setActiveEditSlideIndex(0);
   };
 
   const handleSaveEditSlides = async () => {
@@ -602,6 +737,172 @@ export default function TeacherDashboardScreen() {
     }
   }, [activeGroup?.id]);
 
+  const renderStudentPhoneMockup = (
+    slides: Slide[],
+    currentIndex: number,
+    groupTitle: string,
+    tierDifficulty: string,
+    onNavigateSlide?: (idx: number) => void
+  ) => {
+    const safeIdx = Math.min(currentIndex, Math.max(0, slides.length - 1));
+    const activeSlide = slides[safeIdx] || { description_text: '', image_url: '' };
+    const progressPercent = slides.length > 0 ? ((safeIdx + 1) / slides.length) * 100 : 0;
+    const stageInfo = getStoryGrammarBadge(safeIdx);
+
+    return (
+      <View style={styles.phoneMockupFrame}>
+        {/* Phone Screen Canvas */}
+        <View style={styles.phoneScreenContent}>
+          {/* Android Status Bar with Centered Punch-Hole Camera */}
+          <View style={styles.phoneStatusBar}>
+            <Text style={styles.phoneStatusTime}>10:00</Text>
+            <View style={styles.phonePunchHoleCameraWrapper}>
+              <View style={styles.phonePunchHoleCamera} />
+            </View>
+            <View style={styles.phoneStatusIcons}>
+              <Ionicons name="cellular" size={11} color="#0F172A" />
+              <Ionicons name="wifi" size={11} color="#0F172A" />
+              <Ionicons name="battery-full" size={13} color="#0F172A" />
+            </View>
+          </View>
+
+          {/* Student Header */}
+          <View style={styles.phoneStudentHeader}>
+            <View style={{ flex: 1, marginRight: 6 }}>
+              <Text style={styles.phoneStoryTitle} numberOfLines={1}>
+                {groupTitle || 'New Lesson Story'}
+              </Text>
+              <Text style={styles.phoneStorySubtitle}>
+                {topics.find((t) => t.id === selectedTopicId)?.name || 'ASL'}
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.phoneTierPill,
+                tierDifficulty === 'easy' && styles.phoneTierPillEasy,
+                tierDifficulty === 'medium' && styles.phoneTierPillMedium,
+                tierDifficulty === 'hard' && styles.phoneTierPillHard,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.phoneTierPillText,
+                  tierDifficulty === 'easy' && styles.phoneTierPillTextEasy,
+                  tierDifficulty === 'medium' && styles.phoneTierPillTextMedium,
+                  tierDifficulty === 'hard' && styles.phoneTierPillTextHard,
+                ]}
+              >
+                {(tierDifficulty || 'EASY').toUpperCase()}
+              </Text>
+            </View>
+          </View>
+
+          {/* Progress Header & Bar */}
+          <View style={styles.phoneProgressContainer}>
+            <View style={styles.phoneProgressRow}>
+              <View style={[styles.phoneStageBadge, { backgroundColor: stageInfo.bgColor }]}>
+                <Ionicons name={stageInfo.icon} size={10} color={stageInfo.color} style={{ marginRight: 3 }} />
+                <Text style={[styles.phoneStageBadgeText, { color: stageInfo.color }]}>
+                  {stageInfo.label}
+                </Text>
+              </View>
+              <Text style={styles.phoneProgressText}>
+                Slide {safeIdx + 1} of {slides.length}
+              </Text>
+            </View>
+            <View style={styles.phoneProgressBarBg}>
+              <View style={[styles.phoneProgressBarFill, { width: `${progressPercent}%` }]} />
+            </View>
+          </View>
+
+          {/* Slide Visual Image */}
+          {activeSlide.image_url ? (
+            <Image
+              source={{ uri: resolveImageUrl(activeSlide.image_url) }}
+              style={styles.phoneSlideImg}
+              resizeMode="cover"
+            />
+          ) : (
+            <View style={styles.phoneImgPlaceholder}>
+              <Ionicons name="image-outline" size={24} color="#94A3B8" />
+              <Text style={styles.phoneImgPlaceholderText}>Visual sign image will display here</Text>
+            </View>
+          )}
+
+          {/* Narration Reading Card */}
+          <View style={styles.phoneNarrationCard}>
+            <Text style={styles.phoneNarrationLabel}>STORY READING</Text>
+            <ScrollView style={{ maxHeight: 75 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.phoneNarrationText}>
+                {activeSlide.description_text.trim() || 'Type your slide narration in the editor to see it live on the student screen...'}
+              </Text>
+            </ScrollView>
+          </View>
+
+          {/* Interactive Navigation Controls on Mockup */}
+          <View style={styles.phoneBottomControls}>
+            {safeIdx > 0 && (
+              <TouchableOpacity
+                style={styles.phoneNavBtn}
+                onPress={() => onNavigateSlide && onNavigateSlide(Math.max(0, safeIdx - 1))}
+              >
+                <Ionicons name="arrow-back" size={13} color="#4F46E5" />
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              style={styles.phoneNextBtn}
+              onPress={() => {
+                if (safeIdx < slides.length - 1 && onNavigateSlide) {
+                  onNavigateSlide(safeIdx + 1);
+                }
+              }}
+            >
+              <Text style={styles.phoneNextBtnText}>
+                {safeIdx === slides.length - 1 ? 'Start Quiz ✓' : 'Next Slide →'}
+              </Text>
+            </TouchableOpacity>
+
+            {safeIdx > 0 && (
+              <View style={{ width: 28 }} />
+            )}
+          </View>
+
+          {/* Android 3-Button Navigation Bar (Back, Home, Recent Apps) */}
+          <View style={styles.androidNavBar}>
+            <TouchableOpacity
+              style={styles.androidNavBtn}
+              activeOpacity={0.6}
+              disabled={safeIdx === 0}
+              onPress={() => onNavigateSlide && onNavigateSlide(Math.max(0, safeIdx - 1))}
+            >
+              <Ionicons
+                name="chevron-back"
+                size={15}
+                color={safeIdx === 0 ? "#475569" : "#94A3B8"}
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.androidNavBtn}
+              activeOpacity={0.6}
+              onPress={() => onNavigateSlide && onNavigateSlide(0)}
+            >
+              <Ionicons name="radio-button-off" size={13} color="#94A3B8" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.androidNavBtn}
+              activeOpacity={0.6}
+            >
+              <Ionicons name="square-outline" size={12} color="#94A3B8" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
@@ -756,12 +1057,17 @@ export default function TeacherDashboardScreen() {
                   <TouchableOpacity
                     key={tab.id}
                     style={[styles.tabItem, activeTab === tab.id && styles.tabItemActive]}
-                    onPress={() => setActiveTab(tab.id)}
+                    onPress={() => {
+                      if (tab.id === 'analytics') {
+                        setSelectedStudentForInspect(null);
+                      }
+                      setActiveTab(tab.id);
+                    }}
                   >
                     <Ionicons
                       name={tab.icon}
                       size={18}
-                      color={activeTab === tab.id ? '#2563EB' : '#64748B'}
+                      color={activeTab === tab.id ? '#4F46E5' : '#64748B'}
                       style={{ marginBottom: 4 }}
                     />
                     <Text style={[styles.tabLabel, activeTab === tab.id && styles.tabLabelActive]}>
@@ -777,30 +1083,102 @@ export default function TeacherDashboardScreen() {
           {/* TAB 1: CURRENT LESSONS & QUIZZES HUB */}
           {activeTab === 'current' && (
             <View>
-              {/* Header Bar */}
-              <View style={styles.curriculumTopCard}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.curriculumTopTitle}>
-                    {topics.find((t) => t.id === selectedTopicId)?.name || 'Subject'} Curriculum
-                  </Text>
-                  <Text style={styles.curriculumTopSubtitle}>
-                    Manage stories, difficulty tiers, slides, and attached quizzes in one place.
-                  </Text>
+              {/* CLASS PULSE & ACTIONABLE INTERVENTION HUB */}
+              <View style={styles.pulseContainer}>
+                {/* Header Row: Topic Details & Action Buttons */}
+                <View style={styles.pulseHeaderRow}>
+                  <View style={{ flex: 1, marginRight: 12 }}>
+                    <View style={styles.pulseTitleRow}>
+                      <Text style={styles.pulseTitle}>
+                        {topics.find((t) => t.id === selectedTopicId)?.name || 'Subject'} Curriculum
+                      </Text>
+                      <View style={styles.pulseActiveBadge}>
+                        <View style={styles.pulseActiveDot} />
+                        <Text style={styles.pulseActiveBadgeText}>Active Topic</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.pulseSubtitle}>
+                      Manage stories, difficulty tiers, visual ASL slides, and assessment quizzes.
+                    </Text>
+                  </View>
+
+                  <View style={styles.pulseHeaderActions}>
+                    <TouchableOpacity
+                      style={styles.pulseActionBtnSecondary}
+                      onPress={() => {
+                        fetchLessonGroups(selectedTopicId);
+                        fetchQuizzes(selectedTopicId);
+                      }}
+                    >
+                      <Ionicons name="refresh-outline" size={15} color="#4F46E5" />
+                      <Text style={styles.pulseActionBtnSecondaryText}>Refresh</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.pulseActionBtnPrimary}
+                      onPress={() => setActiveTab('lessons')}
+                    >
+                      <Ionicons name="add-circle" size={16} color="#FFFFFF" />
+                      <Text style={styles.pulseActionBtnPrimaryText}>New Story</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-                <TouchableOpacity
-                  style={styles.refreshBtn}
-                  onPress={() => {
-                    fetchLessonGroups(selectedTopicId);
-                    fetchQuizzes(selectedTopicId);
-                  }}
-                >
-                  <Ionicons name="refresh-outline" size={16} color="#2563EB" />
-                  <Text style={styles.refreshBtnText}>Refresh</Text>
-                </TouchableOpacity>
+
+                {/* Actionable Pulse Cards (Not passive stats) */}
+                <View style={styles.pulseCardsRow}>
+                  {/* Card 1: Quiz Status & Interventions */}
+                  {storiesNeedingQuizzes.length > 0 ? (
+                    <TouchableOpacity
+                      style={[styles.pulseCard, styles.pulseCardAmber]}
+                      onPress={() => setActiveTab('quizzes')}
+                      activeOpacity={0.8}
+                    >
+                      <View style={styles.pulseCardIconAmber}>
+                        <Ionicons name="alert-circle" size={18} color="#D97706" />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.pulseCardTitleAmber}>
+                          {storiesNeedingQuizzes.length} {storiesNeedingQuizzes.length === 1 ? 'Story Needs' : 'Stories Need'} Quiz
+                        </Text>
+                        <Text style={styles.pulseCardSubAmber}>
+                          Tiers exist without assessments. Tap to attach quizzes.
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={16} color="#D97706" />
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={[styles.pulseCard, styles.pulseCardEmerald]}>
+                      <View style={styles.pulseCardIconEmerald}>
+                        <Ionicons name="checkmark-circle" size={18} color="#059669" />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.pulseCardTitleEmerald}>All Quizzes Attached</Text>
+                        <Text style={styles.pulseCardSubEmerald}>
+                          All difficulty tiers are fully equipped for student practice.
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+
+                  {/* Card 2: Tier Coverage / Readiness */}
+                  <View style={[styles.pulseCard, styles.pulseCardIndigo]}>
+                    <View style={styles.pulseCardIconIndigo}>
+                      <Ionicons name="layers" size={18} color="#4F46E5" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.pulseCardTitleIndigo}>
+                        {totalTiers} Tiers Across {totalStories} {totalStories === 1 ? 'Story' : 'Stories'}
+                      </Text>
+                      <Text style={styles.pulseCardSubIndigo}>
+                        {completeStories.length} {completeStories.length === 1 ? 'story has' : 'stories have'} complete Easy, Med & Hard tiers.
+                      </Text>
+                    </View>
+                  </View>
+                </View>
               </View>
 
               {loadingGroups ? (
-                <ActivityIndicator color="#2563EB" size="large" style={{ marginVertical: 30 }} />
+                <ActivityIndicator color="#4F46E5" size="large" style={{ marginVertical: 30 }} />
               ) : lessonGroups.length === 0 ? (
                 <View style={styles.card}>
                   <View style={styles.emptyStateContainer}>
@@ -822,15 +1200,35 @@ export default function TeacherDashboardScreen() {
                 lessonGroups.map((group) => {
                   const tiers = ['easy', 'medium', 'hard'] as const;
                   const availableTiers = tiers.filter((t) => (group.lessons || []).some((l) => l.difficulty === t));
+                  const isExpanded = expandedStoryIds.includes(group.id);
 
                   return (
                     <View key={group.id} style={styles.curriculumStoryCard}>
-                      {/* Story Card Header */}
-                      <View style={styles.storyCardHeader}>
-                        <View style={{ flex: 1 }}>
+                      {/* Story Card Header (Click to expand/collapse) */}
+                      <TouchableOpacity
+                        style={[
+                          styles.storyCardHeader,
+                          !isExpanded && styles.storyCardHeaderCollapsed,
+                        ]}
+                        activeOpacity={0.7}
+                        onPress={() => toggleStoryExpand(group.id)}
+                      >
+                        <View style={{ flex: 1, marginRight: 12 }}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <Ionicons name="book" size={18} color="#2563EB" />
+                            <Ionicons name="book" size={18} color="#4F46E5" />
                             <Text style={styles.storyCardTitle}>{group.title}</Text>
+                            <View
+                              style={[
+                                styles.expandChevronBadge,
+                                isExpanded && styles.expandChevronBadgeActive,
+                              ]}
+                            >
+                              <Ionicons
+                                name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                                size={14}
+                                color={isExpanded ? '#4F46E5' : '#64748B'}
+                              />
+                            </View>
                           </View>
                           <Text style={styles.storyCardSub}>
                             {availableTiers.length} of 3 tiers created ({availableTiers.map((t) => t.toUpperCase()).join(', ') || 'None'})
@@ -839,15 +1237,19 @@ export default function TeacherDashboardScreen() {
 
                         <TouchableOpacity
                           style={styles.storyDeleteBtn}
-                          onPress={() => handleDeleteGroup(group.id, group.title)}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            handleDeleteGroup(group.id, group.title);
+                          }}
                         >
                           <Ionicons name="trash-outline" size={16} color="#DC2626" />
                           <Text style={styles.storyDeleteBtnText}>Trash Story</Text>
                         </TouchableOpacity>
-                      </View>
+                      </TouchableOpacity>
 
-                      {/* Tier Cards List */}
-                      <View style={styles.storyTiersContainer}>
+                      {/* Tier Cards List (Only shown when expanded) */}
+                      {isExpanded && (
+                        <View style={styles.storyTiersContainer}>
                         {tiers.map((tier) => {
                           const tierLesson = (group.lessons || []).find((l) => l.difficulty === tier);
                           const slideCount = tierLesson ? (tierLesson.slide_count ?? tierLesson.slides?.length ?? 0) : 0;
@@ -891,7 +1293,7 @@ export default function TeacherDashboardScreen() {
                                       style={styles.actionBtnSecondary}
                                       onPress={() => handleOpenEditSlides(tierLesson, group.title)}
                                     >
-                                      <Ionicons name="create-outline" size={14} color="#2563EB" />
+                                      <Ionicons name="create-outline" size={14} color="#4F46E5" />
                                       <Text style={styles.actionBtnSecondaryText}>Edit Slides</Text>
                                     </TouchableOpacity>
                                   </View>
@@ -964,15 +1366,16 @@ export default function TeacherDashboardScreen() {
                                   setActiveTab('lessons');
                                 }}
                               >
-                                <Ionicons name="add-circle-outline" size={14} color="#2563EB" />
+                                <Ionicons name="add-circle-outline" size={14} color="#4F46E5" />
                                 <Text style={styles.tierCreateBtnText}>Create {tier.toUpperCase()}</Text>
                               </TouchableOpacity>
                             </View>
                           );
                         })}
                       </View>
-                    </View>
-                  );
+                    )}
+                  </View>
+                );
                 })
               )}
             </View>
@@ -981,127 +1384,290 @@ export default function TeacherDashboardScreen() {
           {/* TAB 2: CREATE LESSON & SLIDES */}
           {activeTab === 'lessons' && (
             <View>
-              {/* Create Lesson Card */}
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Add Lesson or Difficulty Tier</Text>
-                <Text style={styles.cardHelp}>
-                  Create reading and visual slides for students. Knowledge components and mastery targets are generated automatically.
-                </Text>
-
-                <Text style={styles.fieldLabel}>Lesson Group Title</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. The Lost Puppy"
-                  value={lessonGroupName}
-                  onChangeText={setLessonGroupName}
-                />
-
-                <Text style={styles.fieldLabel}>Select Difficulty Tier</Text>
-                <View style={styles.tierRow}>
-                  {(['easy', 'medium', 'hard'] as const).map((tier) => (
-                    <TouchableOpacity
-                      key={tier}
-                      style={[styles.tierBtn, difficulty === tier && styles.tierBtnActive]}
-                      onPress={() => setDifficulty(tier)}
-                    >
-                      <Text style={[styles.tierBtnText, difficulty === tier && styles.tierBtnTextActive]}>
-                        {tier.toUpperCase()}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {/* Slides Section */}
-                <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
-                  Lesson Slides ({descriptions.length})
-                </Text>
-
-                {descriptions.map((desc, idx) => (
-                  <View key={idx} style={styles.slideBox}>
-                    <View style={styles.slideHeader}>
-                      <Text style={styles.slideNumber}>Slide {idx + 1}</Text>
-                      {descriptions.length > 1 && (
-                        <TouchableOpacity
-                          onPress={() => setDescriptions(descriptions.filter((_, i) => i !== idx))}
-                        >
-                          <Ionicons name="trash-outline" size={18} color="#DC2626" />
-                        </TouchableOpacity>
-                      )}
+              {/* Split Workspace: Left Editor Card, Right Sticky Android Simulator */}
+              <View style={[styles.editorLayoutRow, (!isDesktop || !showStudentPreview) && styles.editorLayoutRowMobile]}>
+                {/* Left Column: Lesson Form Card */}
+                <View style={[styles.editorLayoutColumn, (!showStudentPreview || !isDesktop) && { minWidth: '100%' }]}>
+                  <View style={styles.card}>
+                    {/* Header & Student Phone Preview Toggle */}
+                    <View style={styles.editorTopBar}>
+                      <View style={{ flex: 1, minWidth: 220 }}>
+                        <Text style={styles.cardTitle}>Add Lesson or Difficulty Tier</Text>
+                        <Text style={styles.cardHelp}>
+                          Create reading and visual slides for students. Knowledge components and mastery targets are generated automatically.
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={[styles.previewToggleBtn, showStudentPreview && styles.previewToggleBtnActive]}
+                        onPress={() => setShowStudentPreview(!showStudentPreview)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons
+                          name={showStudentPreview ? "phone-portrait" : "phone-portrait-outline"}
+                          size={15}
+                          color={showStudentPreview ? "#4F46E5" : "#64748B"}
+                        />
+                        <Text style={[styles.previewToggleBtnText, showStudentPreview && styles.previewToggleBtnTextActive]}>
+                          {showStudentPreview ? "Hide Android Preview" : "Show Android Preview"}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
 
+                    <Text style={styles.fieldLabel}>Lesson Group Title</Text>
                     <TextInput
-                      style={[styles.input, styles.textArea]}
-                      placeholder="Enter slide reading or story text..."
-                      value={desc.description_text}
-                      onChangeText={(txt) => {
-                        const updated = [...descriptions];
-                        updated[idx].description_text = txt;
-                        setDescriptions(updated);
-                      }}
-                      multiline
+                      style={styles.input}
+                      placeholder="e.g. The Lost Puppy"
+                      value={lessonGroupName}
+                      onChangeText={setLessonGroupName}
                     />
 
-                    {desc.image_url ? (
-                      <View style={styles.imagePreviewContainer}>
-                        <Image source={{ uri: desc.image_url }} style={styles.slidePreviewImg} resizeMode="cover" />
+                    <Text style={styles.fieldLabel}>Select Difficulty Tier</Text>
+                    <View style={styles.tierRow}>
+                      {(['easy', 'medium', 'hard'] as const).map((tier) => (
                         <TouchableOpacity
-                          style={styles.removeImgBtn}
-                          onPress={() => {
-                            const updated = [...descriptions];
-                            updated[idx].image_url = '';
-                            setDescriptions(updated);
-                          }}
+                          key={tier}
+                          style={[styles.tierBtn, difficulty === tier && styles.tierBtnActive]}
+                          onPress={() => setDifficulty(tier)}
                         >
-                          <Ionicons name="close-circle" size={20} color="#DC2626" />
-                          <Text style={styles.removeImgText}>Remove Image</Text>
+                          <Text style={[styles.tierBtnText, difficulty === tier && styles.tierBtnTextActive]}>
+                            {tier.toUpperCase()}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+
+                    {/* Visual Storyboard Filmstrip & Slide Deck Builder */}
+                    <View style={styles.storyboardFilmstripWrapper}>
+                      <View style={styles.filmstripHeaderRow}>
+                        <Text style={styles.filmstripHeaderLabel}>
+                          Lesson Storyboard Deck ({descriptions.length} {descriptions.length === 1 ? 'Slide' : 'Slides'})
+                        </Text>
+                        <Text style={styles.filmstripHeaderHint}>
+                          Tap a slide card to edit or reorder
+                        </Text>
+                      </View>
+
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filmstripScroll}>
+                        {descriptions.map((desc, idx) => {
+                          const isSelected = (activeSlideIndex === idx);
+                          return (
+                            <TouchableOpacity
+                              key={idx}
+                              style={[styles.filmstripCard, isSelected && styles.filmstripCardActive]}
+                              onPress={() => setActiveSlideIndex(idx)}
+                              activeOpacity={0.8}
+                            >
+                              <View style={[styles.filmstripBadge, isSelected && styles.filmstripBadgeActive]}>
+                                <Text style={[styles.filmstripBadgeText, isSelected && styles.filmstripBadgeTextActive]}>
+                                  Slide {idx + 1}
+                                </Text>
+                              </View>
+
+                              {desc.image_url ? (
+                                <Image source={{ uri: resolveImageUrl(desc.image_url) }} style={styles.filmstripThumb} resizeMode="cover" />
+                              ) : (
+                                <View style={styles.filmstripPlaceholderThumb}>
+                                  <Ionicons name="image-outline" size={18} color={isSelected ? '#4F46E5' : '#94A3B8'} />
+                                </View>
+                              )}
+
+                              <Text style={[styles.filmstripExcerpt, isSelected && styles.filmstripExcerptActive]} numberOfLines={2}>
+                                {desc.description_text.trim() || '(No reading text)'}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+
+                        {/* Add Slide Button Card in Filmstrip */}
+                        <TouchableOpacity
+                          style={styles.filmstripAddCard}
+                          onPress={() => {
+                            const nextLen = descriptions.length;
+                            setDescriptions([...descriptions, { description_text: '', image_url: '' }]);
+                            setActiveSlideIndex(nextLen);
+                          }}
+                          activeOpacity={0.7}
+                        >
+                          <View style={styles.filmstripAddIconBox}>
+                            <Ionicons name="add" size={20} color="#4F46E5" />
+                          </View>
+                          <Text style={styles.filmstripAddText}>+ Add Slide</Text>
+                        </TouchableOpacity>
+                      </ScrollView>
+                    </View>
+
+                    {/* Active Slide Canvas Editor */}
+                    {descriptions[Math.min(activeSlideIndex, descriptions.length - 1)] && (() => {
+                      const currentIdx = Math.min(activeSlideIndex, descriptions.length - 1);
+                      const currentSlide = descriptions[currentIdx];
+                      return (
+                        <View style={styles.activeSlideCanvas}>
+                          {/* Canvas Header & Navigation Toolbar */}
+                          <View style={styles.activeSlideToolbar}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                              <View style={styles.activeSlideNumberPill}>
+                                <Text style={styles.activeSlideNumberPillText}>
+                                  Slide {currentIdx + 1} of {descriptions.length}
+                                </Text>
+                              </View>
+                              <Text style={styles.activeSlideHelpText}>Active Slide Editor</Text>
+                            </View>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              {/* Previous Slide */}
+                              <TouchableOpacity
+                                style={[styles.slideNavBtn, currentIdx === 0 && styles.slideNavBtnDisabled]}
+                                onPress={() => setActiveSlideIndex(Math.max(0, currentIdx - 1))}
+                                disabled={currentIdx === 0}
+                              >
+                                <Ionicons name="chevron-back" size={16} color={currentIdx === 0 ? '#94A3B8' : '#4F46E5'} />
+                              </TouchableOpacity>
+
+                              {/* Next Slide */}
+                              <TouchableOpacity
+                                style={[styles.slideNavBtn, currentIdx === descriptions.length - 1 && styles.slideNavBtnDisabled]}
+                                onPress={() => setActiveSlideIndex(Math.min(descriptions.length - 1, currentIdx + 1))}
+                                disabled={currentIdx === descriptions.length - 1}
+                              >
+                                <Ionicons name="chevron-forward" size={16} color={currentIdx === descriptions.length - 1 ? '#94A3B8' : '#4F46E5'} />
+                              </TouchableOpacity>
+
+                              {/* Delete Slide */}
+                              {descriptions.length > 1 && (
+                                <TouchableOpacity
+                                  style={styles.slideDeleteBtn}
+                                  onPress={() => {
+                                    const updated = descriptions.filter((_, i) => i !== currentIdx);
+                                    setDescriptions(updated);
+                                    setActiveSlideIndex(Math.max(0, currentIdx - 1));
+                                  }}
+                                >
+                                  <Ionicons name="trash-outline" size={15} color="#DC2626" />
+                                </TouchableOpacity>
+                              )}
+                            </View>
+                          </View>
+
+                          {/* Reading / Narration Text Input */}
+                          <Text style={styles.canvasFieldLabel}>Slide Reading & Narration Text</Text>
+                          <TextInput
+                            style={[styles.input, styles.canvasTextArea]}
+                            placeholder="Enter slide story or reading passage for Deaf students..."
+                            value={currentSlide.description_text}
+                            onChangeText={(txt) => {
+                              const updated = [...descriptions];
+                              updated[currentIdx].description_text = txt;
+                              setDescriptions(updated);
+                            }}
+                            multiline
+                          />
+
+                          {/* ASL Illustration / Sign Media Box */}
+                          <Text style={[styles.canvasFieldLabel, { marginTop: 8 }]}>ASL Sign / Visual Story Illustration</Text>
+                          {currentSlide.image_url ? (
+                            <View style={styles.canvasImagePreviewContainer}>
+                              <Image
+                                source={{ uri: resolveImageUrl(currentSlide.image_url) }}
+                                style={styles.canvasSlidePreviewImg}
+                                resizeMode="cover"
+                              />
+                              <View style={styles.canvasImageActionsRow}>
+                                <TouchableOpacity
+                                  style={styles.canvasChangeImgBtn}
+                                  onPress={() =>
+                                    pickAndUploadImage((url) => {
+                                      const updated = [...descriptions];
+                                      updated[currentIdx].image_url = url;
+                                      setDescriptions(updated);
+                                    })
+                                  }
+                                >
+                                  <Ionicons name="swap-horizontal" size={15} color="#4F46E5" />
+                                  <Text style={styles.canvasChangeImgText}>Replace Image</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                  style={styles.canvasRemoveImgBtn}
+                                  onPress={() => {
+                                    const updated = [...descriptions];
+                                    updated[currentIdx].image_url = '';
+                                    setDescriptions(updated);
+                                  }}
+                                >
+                                  <Ionicons name="trash-outline" size={15} color="#DC2626" />
+                                  <Text style={styles.canvasRemoveImgText}>Remove</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          ) : (
+                            <TouchableOpacity
+                              style={styles.canvasUploadDropzone}
+                              onPress={() =>
+                                pickAndUploadImage((url) => {
+                                  const updated = [...descriptions];
+                                  updated[currentIdx].image_url = url;
+                                  setDescriptions(updated);
+                                })
+                              }
+                            >
+                              <View style={styles.canvasUploadIconCircle}>
+                                <Ionicons name="cloud-upload-outline" size={24} color="#4F46E5" />
+                              </View>
+                              <Text style={styles.canvasUploadTitle}>Upload ASL Illustration or Gesture Sign</Text>
+                              <Text style={styles.canvasUploadSubtitle}>PNG, JPG, or GIF image for students</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      );
+                    })()}
+
+                    <TouchableOpacity
+                      style={[styles.primaryBtn, submittingLesson && styles.primaryBtnDisabled]}
+                      onPress={handleSubmitLesson}
+                      disabled={submittingLesson}
+                    >
+                      {submittingLesson ? (
+                        <ActivityIndicator color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.primaryBtnText}>Save Lesson</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.viewCurriculumLinkBtn}
+                    onPress={() => setActiveTab('current')}
+                  >
+                    <Ionicons name="layers-outline" size={16} color="#4F46E5" />
+                    <Text style={styles.viewCurriculumLinkText}>View All Current Lessons & Attached Quizzes</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Right Column: Sticky Live Android Preview Stage */}
+                {showStudentPreview && (
+                  <View style={[styles.phoneSimulatorColumn, !isDesktop && styles.phoneSimulatorColumnMobile]}>
+                    <View style={styles.phoneSimulatorCard}>
+                      <View style={styles.previewPanelHeader}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <View style={styles.phoneSimulatorLiveDot} />
+                          <Text style={styles.previewPanelTitle}>Live Student Preview</Text>
+                        </View>
+                        <TouchableOpacity
+                          style={styles.previewPanelCloseBtn}
+                          onPress={() => setShowStudentPreview(false)}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="close" size={16} color="#64748B" />
                         </TouchableOpacity>
                       </View>
-                    ) : (
-                      <TouchableOpacity
-                        style={styles.uploadBtn}
-                        onPress={() =>
-                          pickAndUploadImage((url) => {
-                            const updated = [...descriptions];
-                            updated[idx].image_url = url;
-                            setDescriptions(updated);
-                          })
-                        }
-                      >
-                        <Ionicons name="image-outline" size={18} color="#2563EB" />
-                        <Text style={styles.uploadBtnText}>Upload Slide Image</Text>
-                      </TouchableOpacity>
-                    )}
+                      <Text style={styles.previewPanelSubtitle}>
+                        Real-time interactive Android student view
+                      </Text>
+                      {renderStudentPhoneMockup(descriptions, activeSlideIndex, lessonGroupName, difficulty, setActiveSlideIndex)}
+                    </View>
                   </View>
-                ))}
-
-                <TouchableOpacity
-                  style={styles.addSlideBtn}
-                  onPress={() => setDescriptions([...descriptions, { description_text: '', image_url: '' }])}
-                >
-                  <Ionicons name="add-circle-outline" size={18} color="#2563EB" />
-                  <Text style={styles.addSlideBtnText}>Add Another Slide</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.primaryBtn, submittingLesson && styles.primaryBtnDisabled]}
-                  onPress={handleSubmitLesson}
-                  disabled={submittingLesson}
-                >
-                  {submittingLesson ? (
-                    <ActivityIndicator color="#FFFFFF" />
-                  ) : (
-                    <Text style={styles.primaryBtnText}>Save Lesson</Text>
-                  )}
-                </TouchableOpacity>
+                )}
               </View>
-
-              <TouchableOpacity
-                style={styles.viewCurriculumLinkBtn}
-                onPress={() => setActiveTab('current')}
-              >
-                <Ionicons name="layers-outline" size={16} color="#2563EB" />
-                <Text style={styles.viewCurriculumLinkText}>View All Current Lessons & Attached Quizzes</Text>
-              </TouchableOpacity>
             </View>
           )}
 
@@ -1142,7 +1708,7 @@ export default function TeacherDashboardScreen() {
                             <Ionicons
                               name="book-outline"
                               size={15}
-                              color={isGroupActive ? '#FFFFFF' : '#2563EB'}
+                              color={isGroupActive ? '#FFFFFF' : '#4F46E5'}
                               style={{ marginRight: 6 }}
                             />
                             <Text style={[styles.lessonGroupChipText, isGroupActive && styles.lessonGroupChipTextActive]}>
@@ -1403,7 +1969,7 @@ export default function TeacherDashboardScreen() {
                             setQuestions(updated);
                           }}
                         >
-                          <Ionicons name="add" size={16} color="#2563EB" />
+                          <Ionicons name="add" size={16} color="#4F46E5" />
                           <Text style={styles.addPairBtnText}>Add Matching Pair</Text>
                         </TouchableOpacity>
                       </View>
@@ -1442,7 +2008,7 @@ export default function TeacherDashboardScreen() {
                     ])
                   }
                 >
-                  <Ionicons name="add-circle-outline" size={18} color={selectedLessonHasQuiz ? '#94A3B8' : '#2563EB'} />
+                  <Ionicons name="add-circle-outline" size={18} color={selectedLessonHasQuiz ? '#94A3B8' : '#4F46E5'} />
                   <Text style={[styles.addSlideBtnText, selectedLessonHasQuiz && { color: '#94A3B8' }]}>
                     Add Question to Pool
                   </Text>
@@ -1474,7 +2040,7 @@ export default function TeacherDashboardScreen() {
                 style={styles.viewCurriculumLinkBtn}
                 onPress={() => setActiveTab('current')}
               >
-                <Ionicons name="layers-outline" size={16} color="#2563EB" />
+                <Ionicons name="layers-outline" size={16} color="#4F46E5" />
                 <Text style={styles.viewCurriculumLinkText}>View All Current Lessons & Attached Quizzes</Text>
               </TouchableOpacity>
             </View>
@@ -1484,54 +2050,780 @@ export default function TeacherDashboardScreen() {
           {activeTab === 'analytics' && (
             <View>
               {loadingAnalytics ? (
-                <ActivityIndicator color="#2563EB" size="large" style={{ marginVertical: 30 }} />
+                <View style={styles.analyticsLoadingBox}>
+                  <ActivityIndicator color="#4F46E5" size="large" />
+                  <Text style={styles.analyticsLoadingText}>Loading class analytics & student records...</Text>
+                </View>
               ) : !analyticsData ? (
                 <View style={styles.card}>
                   <Text style={styles.emptyText}>No analytics data available yet.</Text>
                 </View>
-              ) : (
+              ) : selectedStudentForInspect === null ? (
+                /* ─── OPTION A: MAIN CLASS ANALYTICS (CLEAN & UNCLUTTERED) ─── */
                 <>
-                  {/* Summary Metrics */}
+                  {/* 1. Executive Summary Metric Cards (4 cards) */}
                   <View style={styles.metricsRow}>
                     <View style={styles.metricCard}>
+                      <View style={[styles.metricIconWrap, { backgroundColor: '#EEF2FF' }]}>
+                        <Ionicons name="people-outline" size={20} color="#4F46E5" />
+                      </View>
                       <Text style={styles.metricValue}>{analyticsData.total_students || 0}</Text>
-                      <Text style={styles.metricLabel}>Total Students</Text>
+                      <Text style={styles.metricLabel}>Enrolled Students</Text>
                     </View>
+
                     <View style={styles.metricCard}>
-                      <Text style={styles.metricValue}>{analyticsData.total_attempts || 0}</Text>
+                      <View style={[styles.metricIconWrap, { backgroundColor: '#ECFDF5' }]}>
+                        <Ionicons name="checkmark-done-circle-outline" size={20} color="#059669" />
+                      </View>
+                      <Text style={[styles.metricValue, { color: '#059669' }]}>{analyticsData.total_attempts || 0}</Text>
                       <Text style={styles.metricLabel}>Quizzes Completed</Text>
                     </View>
+
                     <View style={styles.metricCard}>
-                      <Text style={styles.metricValue}>
-                        {analyticsData.avg_score !== undefined ? `${Math.round(analyticsData.avg_score)}%` : '0%'}
+                      <View style={[styles.metricIconWrap, { backgroundColor: '#EFF6FF' }]}>
+                        <Ionicons name="trending-up-outline" size={20} color="#2563EB" />
+                      </View>
+                      <Text style={[styles.metricValue, { color: '#2563EB' }]}>
+                        {Math.round(analyticsData.class_avg_accuracy ?? analyticsData.avg_accuracy ?? 0)}%
                       </Text>
                       <Text style={styles.metricLabel}>Class Accuracy</Text>
                     </View>
+
+                    <View style={styles.metricCard}>
+                      <View style={[styles.metricIconWrap, { backgroundColor: '#FAF5FF' }]}>
+                        <Ionicons name="book-outline" size={20} color="#7C3AED" />
+                      </View>
+                      <Text style={[styles.metricValue, { color: '#7C3AED' }]}>
+                        {analyticsData.topic_stats
+                          ? (Array.isArray(analyticsData.topic_stats)
+                              ? analyticsData.topic_stats.length
+                              : Object.keys(analyticsData.topic_stats).length)
+                          : 4}
+                      </Text>
+                      <Text style={styles.metricLabel}>Active Subjects</Text>
+                    </View>
                   </View>
 
-                  {/* Student Performance Roster */}
+                  {/* 2. Curriculum Coverage Strip */}
                   <View style={styles.card}>
-                    <Text style={styles.cardTitle}>Student Performance Roster</Text>
-                    {(analyticsData.student_roster || []).length === 0 ? (
-                      <Text style={styles.emptyText}>No active students registered yet.</Text>
-                    ) : (
-                      (analyticsData.student_roster || []).map((student: any) => (
-                        <View key={student.id} style={styles.studentCard}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.studentName}>{student.name || 'Student'}</Text>
-                            <Text style={styles.studentSub}>
-                              @{student.username} • {student.attempts_count || 0} quizzes done
-                            </Text>
+                    <View style={styles.analyticsSectionHeader}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Ionicons name="library-outline" size={18} color="#4F46E5" />
+                        <Text style={styles.cardTitle}>Curriculum Distribution</Text>
+                      </View>
+                      <Text style={styles.analyticsSectionHint}>Content scope & quiz availability across topics</Text>
+                    </View>
+
+                    <View style={styles.curriculumGrid}>
+                      {[
+                        { id: 'story-grammar', label: 'Story Grammar', icon: 'book-outline', color: '#4F46E5', bg: '#EEF2FF' },
+                        { id: 'mathematics', label: 'Mathematics', icon: 'calculator-outline', color: '#059669', bg: '#ECFDF5' },
+                        { id: 'technology-and-livelihood-education', label: 'TLE (ICT)', icon: 'hardware-chip-outline', color: '#D97706', bg: '#FFFBEB' },
+                        { id: 'araling-panlipunan', label: 'Araling Panlipunan', icon: 'globe-outline', color: '#7C3AED', bg: '#FAF5FF' },
+                      ].map((sub) => {
+                        const topicStatsObj = analyticsData.topic_stats;
+                        const stat = topicStatsObj
+                          ? (Array.isArray(topicStatsObj)
+                              ? topicStatsObj.find((t: any) => t.topic_id === sub.id)
+                              : topicStatsObj[sub.id])
+                          : null;
+                        return (
+                          <View key={sub.id} style={styles.curriculumSubjectCard}>
+                            <View style={[styles.curriculumIconCircle, { backgroundColor: sub.bg }]}>
+                              <Ionicons name={sub.icon as any} size={18} color={sub.color} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.curriculumSubjectName}>{sub.label}</Text>
+                              <Text style={styles.curriculumSubjectStats}>
+                                {stat
+                                  ? (stat.total_lessons !== undefined
+                                      ? `${stat.total_lessons} Lessons • ${stat.total_quizzes} Quizzes`
+                                      : `${stat.attempts || 0} attempts • ${Math.round(stat.avg_accuracy || 0)}% avg`)
+                                  : 'Curriculum Ready'}
+                              </Text>
+                            </View>
                           </View>
-                          <View style={styles.starBadge}>
-                            <Ionicons name="star" size={14} color="#D97706" />
-                            <Text style={styles.starBadgeText}>{student.total_stars || 0}</Text>
-                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {/* 3. Student Performance Directory (Uncluttered Roster) */}
+                  <View style={styles.card}>
+                    <View style={styles.analyticsSectionHeader}>
+                      <View>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Ionicons name="school-outline" size={18} color="#4F46E5" />
+                          <Text style={styles.cardTitle}>Student Performance Directory</Text>
                         </View>
-                      ))
-                    )}
+                        <Text style={styles.analyticsSectionHint}>
+                          Click any student card to inspect detailed quiz attempts, cognitive BKT mastery, and badges
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Search & Sort Bar */}
+                    <View style={styles.directoryControlsRow}>
+                      <View style={styles.directorySearchInputWrap}>
+                        <Ionicons name="search-outline" size={16} color="#94A3B8" />
+                        <TextInput
+                          style={styles.directorySearchInput}
+                          placeholder="Search student by name or username..."
+                          placeholderTextColor="#94A3B8"
+                          value={searchStudentQuery}
+                          onChangeText={setSearchStudentQuery}
+                        />
+                        {searchStudentQuery.length > 0 && (
+                          <TouchableOpacity onPress={() => setSearchStudentQuery('')}>
+                            <Ionicons name="close-circle" size={16} color="#94A3B8" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      {/* Sort Pills */}
+                      <View style={styles.sortPillsRow}>
+                        <TouchableOpacity
+                          style={[styles.sortPill, studentSortBy === 'stars' && styles.sortPillActive]}
+                          onPress={() => setStudentSortBy('stars')}
+                        >
+                          <Ionicons
+                            name="star"
+                            size={12}
+                            color={studentSortBy === 'stars' ? '#4F46E5' : '#64748B'}
+                          />
+                          <Text
+                            style={[styles.sortPillText, studentSortBy === 'stars' && styles.sortPillTextActive]}
+                          >
+                            Top Stars
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.sortPill, studentSortBy === 'attempts' && styles.sortPillActive]}
+                          onPress={() => setStudentSortBy('attempts')}
+                        >
+                          <Ionicons
+                            name="flame"
+                            size={12}
+                            color={studentSortBy === 'attempts' ? '#4F46E5' : '#64748B'}
+                          />
+                          <Text
+                            style={[
+                              styles.sortPillText,
+                              studentSortBy === 'attempts' && styles.sortPillTextActive,
+                            ]}
+                          >
+                            Most Active
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.sortPill, studentSortBy === 'needs_support' && styles.sortPillActive]}
+                          onPress={() => setStudentSortBy('needs_support')}
+                        >
+                          <Ionicons
+                            name="alert-circle-outline"
+                            size={12}
+                            color={studentSortBy === 'needs_support' ? '#4F46E5' : '#64748B'}
+                          />
+                          <Text
+                            style={[
+                              styles.sortPillText,
+                              studentSortBy === 'needs_support' && styles.sortPillTextActive,
+                            ]}
+                          >
+                            Needs Support
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+
+                    {/* Student List */}
+                    {(() => {
+                      const roster = (analyticsData.student_roster || []).filter((s: any) => {
+                        const q = searchStudentQuery.toLowerCase().trim();
+                        if (!q) return true;
+                        return (
+                          (s.name || '').toLowerCase().includes(q) ||
+                          (s.username || '').toLowerCase().includes(q)
+                        );
+                      }).sort((a: any, b: any) => {
+                        if (studentSortBy === 'needs_support') {
+                          return (a.avg_accuracy || 0) - (b.avg_accuracy || 0);
+                        }
+                        if (studentSortBy === 'attempts') {
+                          return (b.attempts_count || 0) - (a.attempts_count || 0);
+                        }
+                        return (b.total_stars || 0) - (a.total_stars || 0);
+                      });
+
+                      if (roster.length === 0) {
+                        return (
+                          <View style={styles.directoryEmptyBox}>
+                            <Ionicons name="search-outline" size={28} color="#CBD5E1" />
+                            <Text style={styles.emptyText}>No students match the search filter.</Text>
+                          </View>
+                        );
+                      }
+
+                      return roster.map((student: any) => {
+                        const accuracy = Math.round(student.avg_accuracy || 0);
+                        const isHighAcc = accuracy >= 70;
+                        const isMidAcc = accuracy >= 50 && accuracy < 70;
+                        const accColor = isHighAcc ? '#059669' : isMidAcc ? '#D97706' : '#DC2626';
+                        const accBg = isHighAcc ? '#ECFDF5' : isMidAcc ? '#FFFBEB' : '#FEF2F2';
+
+                        return (
+                          <TouchableOpacity
+                            key={student.user_id || student.id}
+                            style={styles.studentDirectoryCard}
+                            onPress={() => handleInspectStudent(student)}
+                            activeOpacity={0.7}
+                          >
+                            {/* Student Avatar */}
+                            <View style={styles.studentAvatarCircle}>
+                              <Text style={styles.studentAvatarText}>
+                                {(student.name || 'Student').slice(0, 2).toUpperCase()}
+                              </Text>
+                            </View>
+
+                            {/* Main Info */}
+                            <View style={{ flex: 1, marginRight: 12 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <Text style={styles.studentName}>{student.name || 'Student'}</Text>
+                                <Text style={styles.studentUsername}>@{student.username}</Text>
+                              </View>
+
+                              {/* Badges / Metrics Row */}
+                              <View style={styles.studentMetricsPillsRow}>
+                                <View style={styles.studentPillItem}>
+                                  <Ionicons name="star" size={12} color="#D97706" />
+                                  <Text style={styles.studentPillText}>{student.total_stars || 0} Stars</Text>
+                                </View>
+
+                                <View style={styles.studentPillItem}>
+                                  <Ionicons name="document-text-outline" size={12} color="#4F46E5" />
+                                  <Text style={styles.studentPillText}>{student.attempts_count || 0} Quizzes</Text>
+                                </View>
+
+                                <View style={[styles.studentPillItem, { backgroundColor: accBg }]}>
+                                  <Ionicons name="analytics-outline" size={12} color={accColor} />
+                                  <Text style={[styles.studentPillText, { color: accColor, fontWeight: '700' }]}>
+                                    {accuracy}% Acc
+                                  </Text>
+                                </View>
+
+                                {Boolean(student.current_streak && student.current_streak > 0) && (
+                                  <View style={[styles.studentPillItem, { backgroundColor: '#FFF7ED' }]}>
+                                    <Ionicons name="flame" size={12} color="#EA580C" />
+                                    <Text style={[styles.studentPillText, { color: '#EA580C' }]}>
+                                      {student.current_streak}d streak
+                                    </Text>
+                                  </View>
+                                )}
+                              </View>
+                            </View>
+
+                            {/* Action Button Indicator */}
+                            <View style={styles.inspectStudentBtn}>
+                              <Text style={styles.inspectStudentBtnText}>Inspect</Text>
+                              <Ionicons name="chevron-forward" size={15} color="#4F46E5" />
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      });
+                    })()}
                   </View>
                 </>
+              ) : (
+                /* ─── OPTION A: STUDENT DOSSIER SUB-VIEW (ON-DEMAND DEEP DIVE) ─── */
+                <View style={styles.dossierContainer}>
+                  {/* Top Breadcrumb Navigation */}
+                  <View style={styles.dossierBreadcrumbBar}>
+                    <TouchableOpacity
+                      style={styles.dossierBackBtn}
+                      onPress={() => setSelectedStudentForInspect(null)}
+                    >
+                      <Ionicons name="arrow-back-outline" size={18} color="#4F46E5" />
+                      <Text style={styles.dossierBackBtnText}>Back to Class Analytics</Text>
+                    </TouchableOpacity>
+
+                    <View style={styles.dossierHeaderBadge}>
+                      <Ionicons name="shield-checkmark-outline" size={14} color="#059669" />
+                      <Text style={styles.dossierHeaderBadgeText}>Student Dossier</Text>
+                    </View>
+                  </View>
+
+                  {/* Student Header Profile Card */}
+                  <View style={styles.dossierProfileCard}>
+                    <View style={styles.dossierProfileTop}>
+                      <View style={styles.dossierAvatar}>
+                        <Text style={styles.dossierAvatarText}>
+                          {(selectedStudentForInspect.name || 'S').slice(0, 2).toUpperCase()}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.dossierStudentName}>
+                          {selectedStudentForInspect.name || 'Student'}
+                        </Text>
+                        <Text style={styles.dossierStudentUser}>
+                          @{selectedStudentForInspect.username} • Enrolled Student
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Quick Metric Stat Row */}
+                    <View style={styles.dossierQuickStatsRow}>
+                      <View style={styles.dossierQuickStatCard}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="star" size={15} color="#D97706" />
+                          <Text style={styles.dossierQuickStatValue}>
+                            {selectedStudentForInspect.total_stars || 0}
+                          </Text>
+                        </View>
+                        <Text style={styles.dossierQuickStatLabel}>Total Stars</Text>
+                      </View>
+
+                      <View style={styles.dossierQuickStatCard}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="document-text-outline" size={15} color="#4F46E5" />
+                          <Text style={styles.dossierQuickStatValue}>
+                            {selectedStudentForInspect.attempts_count || studentQuizAttempts.length}
+                          </Text>
+                        </View>
+                        <Text style={styles.dossierQuickStatLabel}>Quizzes Completed</Text>
+                      </View>
+
+                      <View style={styles.dossierQuickStatCard}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="analytics-outline" size={15} color="#2563EB" />
+                          <Text style={styles.dossierQuickStatValue}>
+                            {Math.round(selectedStudentForInspect.avg_accuracy || 0)}%
+                          </Text>
+                        </View>
+                        <Text style={styles.dossierQuickStatLabel}>Mean Accuracy</Text>
+                      </View>
+
+                      <View style={styles.dossierQuickStatCard}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="flame" size={15} color="#EA580C" />
+                          <Text style={styles.dossierQuickStatValue}>
+                            {selectedStudentForInspect.current_streak || 0}d
+                          </Text>
+                        </View>
+                        <Text style={styles.dossierQuickStatLabel}>Current Streak</Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Dossier Segmented Tabs */}
+                  <View style={styles.dossierSegmentedBar}>
+                    <TouchableOpacity
+                      style={[
+                        styles.dossierSegmentTab,
+                        studentDossierTab === 'attempts' && styles.dossierSegmentTabActive,
+                      ]}
+                      onPress={() => setStudentDossierTab('attempts')}
+                    >
+                      <Ionicons
+                        name="document-text-outline"
+                        size={16}
+                        color={studentDossierTab === 'attempts' ? '#4F46E5' : '#64748B'}
+                      />
+                      <Text
+                        style={[
+                          styles.dossierSegmentTabText,
+                          studentDossierTab === 'attempts' && styles.dossierSegmentTabTextActive,
+                        ]}
+                      >
+                        Quiz Attempts ({studentQuizAttempts.length})
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.dossierSegmentTab,
+                        studentDossierTab === 'mastery' && styles.dossierSegmentTabActive,
+                      ]}
+                      onPress={() => setStudentDossierTab('mastery')}
+                    >
+                      <Ionicons
+                        name="hardware-chip-outline"
+                        size={16}
+                        color={studentDossierTab === 'mastery' ? '#4F46E5' : '#64748B'}
+                      />
+                      <Text
+                        style={[
+                          styles.dossierSegmentTabText,
+                          studentDossierTab === 'mastery' && styles.dossierSegmentTabTextActive,
+                        ]}
+                      >
+                        pyBKT Mastery ({studentKcMastery.length})
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.dossierSegmentTab,
+                        studentDossierTab === 'badges' && styles.dossierSegmentTabActive,
+                      ]}
+                      onPress={() => setStudentDossierTab('badges')}
+                    >
+                      <Ionicons
+                        name="trophy-outline"
+                        size={16}
+                        color={studentDossierTab === 'badges' ? '#4F46E5' : '#64748B'}
+                      />
+                      <Text
+                        style={[
+                          styles.dossierSegmentTabText,
+                          studentDossierTab === 'badges' && styles.dossierSegmentTabTextActive,
+                        ]}
+                      >
+                        Badges ({studentBadges.filter((b: any) => b.unlocked).length}/{studentBadges.length || 6})
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Dossier Tab Content */}
+                  {loadingStudentDetails ? (
+                    <View style={styles.analyticsLoadingBox}>
+                      <ActivityIndicator color="#4F46E5" size="large" />
+                      <Text style={styles.analyticsLoadingText}>Loading student dossier details...</Text>
+                    </View>
+                  ) : studentDossierTab === 'attempts' ? (
+                    /* ── TAB 1: QUIZ ATTEMPTS HISTORY ── */
+                    <View style={styles.dossierTabContent}>
+                      {/* Sub-filter chips */}
+                      <View style={styles.attemptsFilterRow}>
+                        <TouchableOpacity
+                          style={[
+                            styles.filterChip,
+                            studentAttemptFilter === 'all' && styles.filterChipActive,
+                          ]}
+                          onPress={() => setStudentAttemptFilter('all')}
+                        >
+                          <Text
+                            style={[
+                              styles.filterChipText,
+                              studentAttemptFilter === 'all' && styles.filterChipTextActive,
+                            ]}
+                          >
+                            All ({studentQuizAttempts.length})
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.filterChip,
+                            studentAttemptFilter === 'passed' && styles.filterChipActive,
+                          ]}
+                          onPress={() => setStudentAttemptFilter('passed')}
+                        >
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={13}
+                            color={studentAttemptFilter === 'passed' ? '#059669' : '#64748B'}
+                          />
+                          <Text
+                            style={[
+                              styles.filterChipText,
+                              studentAttemptFilter === 'passed' && styles.filterChipTextActive,
+                            ]}
+                          >
+                            Passed ({studentQuizAttempts.filter((a: any) => a.passed).length})
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.filterChip,
+                            studentAttemptFilter === 'review' && styles.filterChipActive,
+                          ]}
+                          onPress={() => setStudentAttemptFilter('review')}
+                        >
+                          <Ionicons
+                            name="alert-circle"
+                            size={13}
+                            color={studentAttemptFilter === 'review' ? '#DC2626' : '#64748B'}
+                          />
+                          <Text
+                            style={[
+                              styles.filterChipText,
+                              studentAttemptFilter === 'review' && styles.filterChipTextActive,
+                            ]}
+                          >
+                            Needs Review ({studentQuizAttempts.filter((a: any) => !a.passed).length})
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Attempts List */}
+                      {(() => {
+                        const filtered = studentQuizAttempts.filter((a: any) => {
+                          if (studentAttemptFilter === 'passed') return a.passed;
+                          if (studentAttemptFilter === 'review') return !a.passed;
+                          return true;
+                        });
+
+                        if (filtered.length === 0) {
+                          return (
+                            <View style={styles.directoryEmptyBox}>
+                              <Ionicons name="document-text-outline" size={32} color="#CBD5E1" />
+                              <Text style={styles.emptyText}>No quiz attempts found under this filter.</Text>
+                            </View>
+                          );
+                        }
+
+                        return filtered.map((attempt: any) => {
+                          const diff = (attempt.difficulty || 'easy').toLowerCase();
+                          const diffColor =
+                            diff === 'hard' ? '#7C3AED' : diff === 'medium' ? '#2563EB' : '#059669';
+                          const diffBg =
+                            diff === 'hard' ? '#F5F3FF' : diff === 'medium' ? '#EFF6FF' : '#ECFDF5';
+
+                          return (
+                            <View key={attempt.attempt_id} style={styles.attemptCard}>
+                              <View style={styles.attemptCardTop}>
+                                <View style={{ flex: 1, marginRight: 8 }}>
+                                  <Text style={styles.attemptQuizTitle}>{attempt.quiz_title || 'Untitled Quiz'}</Text>
+                                  <Text style={styles.attemptTopicText}>
+                                    Topic: {attempt.topic_id || 'General'}
+                                  </Text>
+                                </View>
+
+                                <View style={[styles.diffBadge, { backgroundColor: diffBg, borderColor: diffColor }]}>
+                                  <Text style={[styles.diffBadgeText, { color: diffColor }]}>
+                                    {diff.toUpperCase()}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              <View style={styles.attemptCardBottom}>
+                                <View style={styles.attemptScoreGroup}>
+                                  <Text style={styles.attemptScoreText}>
+                                    Score: <Text style={{ fontWeight: '800', color: '#0F172A' }}>{attempt.score}/{attempt.total_questions}</Text>
+                                  </Text>
+                                  <Text style={styles.attemptAccPercent}>
+                                    ({Math.round(attempt.accuracy_pct || 0)}%)
+                                  </Text>
+                                </View>
+
+                                <View
+                                  style={[
+                                    styles.attemptStatusPill,
+                                    attempt.passed ? styles.attemptStatusPassed : styles.attemptStatusFailed,
+                                  ]}
+                                >
+                                  <Ionicons
+                                    name={attempt.passed ? 'checkmark-circle' : 'alert-circle'}
+                                    size={14}
+                                    color={attempt.passed ? '#059669' : '#DC2626'}
+                                  />
+                                  <Text
+                                    style={[
+                                      styles.attemptStatusText,
+                                      { color: attempt.passed ? '#059669' : '#DC2626' },
+                                    ]}
+                                  >
+                                    {attempt.passed ? 'PASSED (>=70%)' : 'NEEDS PRACTICE'}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              {Boolean(attempt.completed_at || attempt.time_spent_seconds) && (
+                                <View style={styles.attemptMetaRow}>
+                                  {Boolean(attempt.time_spent_seconds) && (
+                                    <View style={styles.attemptMetaItem}>
+                                      <Ionicons name="time-outline" size={12} color="#94A3B8" />
+                                      <Text style={styles.attemptMetaText}>{attempt.time_spent_seconds}s</Text>
+                                    </View>
+                                  )}
+                                  {Boolean(attempt.completed_at) && (
+                                    <View style={styles.attemptMetaItem}>
+                                      <Ionicons name="calendar-outline" size={12} color="#94A3B8" />
+                                      <Text style={styles.attemptMetaText}>
+                                        {new Date(attempt.completed_at).toLocaleDateString()} {new Date(attempt.completed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                      </Text>
+                                    </View>
+                                  )}
+                                </View>
+                              )}
+                            </View>
+                          );
+                        });
+                      })()}
+                    </View>
+                  ) : studentDossierTab === 'mastery' ? (
+                    /* ── TAB 2: pyBKT COGNITIVE MASTERY BREAKDOWN ── */
+                    <View style={styles.dossierTabContent}>
+                      {/* Explanatory Banner */}
+                      <View style={styles.bktBanner}>
+                        <View style={styles.bktBannerIcon}>
+                          <Ionicons name="hardware-chip-outline" size={20} color="#4F46E5" />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.bktBannerTitle}>
+                            Bayesian Knowledge Tracing (pyBKT) Model
+                          </Text>
+                          <Text style={styles.bktBannerDesc}>
+                            Estimates the student's latent mastery probability P(L) based on sequential quiz interactions, accounting for slip and guess probabilities.
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Mastery Summary Stat Tally */}
+                      {(() => {
+                        const mastered = studentKcMastery.filter((k: any) => (k.p_mastery ?? 0) >= 0.70).length;
+                        const developing = studentKcMastery.filter((k: any) => (k.p_mastery ?? 0) >= 0.30 && (k.p_mastery ?? 0) < 0.70).length;
+                        const struggling = studentKcMastery.filter((k: any) => (k.p_mastery ?? 0) < 0.30 && (k.total_opportunities || 0) > 0).length;
+
+                        return (
+                          <View style={styles.bktSummaryRow}>
+                            <View style={[styles.bktSummaryCard, { borderColor: '#A7F3D0', backgroundColor: '#F0FDF4' }]}>
+                              <Text style={[styles.bktSummaryValue, { color: '#059669' }]}>{mastered}</Text>
+                              <Text style={styles.bktSummaryLabel}>Mastered (&gt;=70%)</Text>
+                            </View>
+                            <View style={[styles.bktSummaryCard, { borderColor: '#FDE68A', backgroundColor: '#FFFBEB' }]}>
+                              <Text style={[styles.bktSummaryValue, { color: '#D97706' }]}>{developing}</Text>
+                              <Text style={styles.bktSummaryLabel}>Developing (30-69%)</Text>
+                            </View>
+                            <View style={[styles.bktSummaryCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
+                              <Text style={[styles.bktSummaryValue, { color: '#DC2626' }]}>{struggling}</Text>
+                              <Text style={styles.bktSummaryLabel}>Struggling (&lt;30%)</Text>
+                            </View>
+                          </View>
+                        );
+                      })()}
+
+                      {/* KC Mastery List */}
+                      {studentKcMastery.length === 0 ? (
+                        <View style={styles.directoryEmptyBox}>
+                          <Ionicons name="hardware-chip-outline" size={32} color="#CBD5E1" />
+                          <Text style={styles.emptyText}>No knowledge components tracked yet.</Text>
+                        </View>
+                      ) : (
+                        studentKcMastery.map((kc: any) => {
+                          const pMastery = kc.p_mastery ?? 0;
+                          const pct = Math.round(kc.p_mastery_pct ?? (pMastery * 100));
+                          const isMastered = pMastery >= 0.70;
+                          const isDeveloping = pMastery >= 0.30 && pMastery < 0.70;
+                          const statusColor = isMastered ? '#059669' : isDeveloping ? '#D97706' : '#DC2626';
+                          const statusBg = isMastered ? '#ECFDF5' : isDeveloping ? '#FFFBEB' : '#FEF2F2';
+                          const statusLabel = isMastered ? 'Mastered' : isDeveloping ? 'Developing' : 'Struggling';
+
+                          return (
+                            <View key={kc.kc_name} style={styles.kcCard}>
+                              <View style={styles.kcCardHeader}>
+                                <View style={{ flex: 1, marginRight: 8 }}>
+                                  <Text style={styles.kcTitle}>{kc.display_name || kc.kc_name}</Text>
+                                  <Text style={styles.kcTopic}>{kc.topic_id || 'General'}</Text>
+                                </View>
+
+                                <View style={[styles.kcStatusPill, { backgroundColor: statusBg }]}>
+                                  <Text style={[styles.kcStatusPillText, { color: statusColor }]}>
+                                    {statusLabel}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              {/* Mastery Progress Bar */}
+                              <View style={styles.kcProgressBarTrack}>
+                                <View
+                                  style={[
+                                    styles.kcProgressBarFill,
+                                    { width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: statusColor },
+                                  ]}
+                                />
+                              </View>
+
+                              {/* Metrics Details */}
+                              <View style={styles.kcFooterRow}>
+                                <Text style={styles.kcMasteryPercent}>
+                                  P(Mastery): <Text style={{ color: statusColor, fontWeight: '700' }}>{pct}%</Text>
+                                </Text>
+                                <Text style={styles.kcCountsText}>
+                                  {kc.correct_count || 0} Correct • {kc.wrong_count || 0} Wrong • {kc.total_opportunities || 0} Opportunities
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+                    </View>
+                  ) : (
+                    /* ── TAB 3: MILESTONE ACHIEVEMENTS & BADGES ── */
+                    <View style={styles.dossierTabContent}>
+                      <View style={styles.badgesSummaryBanner}>
+                        <Ionicons name="trophy" size={20} color="#D97706" />
+                        <Text style={styles.badgesSummaryBannerText}>
+                          {studentBadges.filter((b: any) => b.unlocked).length} of {studentBadges.length} Milestone Badges Unlocked
+                        </Text>
+                      </View>
+
+                      <View style={styles.badgesGrid}>
+                        {studentBadges.map((badge: any) => (
+                          <View
+                            key={badge.id}
+                            style={[
+                              styles.badgeCard,
+                              !badge.unlocked && styles.badgeCardLocked,
+                            ]}
+                          >
+                            <View
+                              style={[
+                                styles.badgeIconCircle,
+                                { backgroundColor: badge.unlocked ? (badge.color ? `${badge.color}20` : '#EEF2FF') : '#F1F5F9' },
+                              ]}
+                            >
+                              <Ionicons
+                                name={(badge.icon as any) || 'trophy-outline'}
+                                size={22}
+                                color={badge.unlocked ? (badge.color || '#4F46E5') : '#94A3B8'}
+                              />
+                            </View>
+
+                            <View style={{ flex: 1 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                                <Text
+                                  style={[
+                                    styles.badgeTitle,
+                                    !badge.unlocked && styles.badgeTitleLocked,
+                                  ]}
+                                >
+                                  {badge.title}
+                                </Text>
+
+                                <View
+                                  style={[
+                                    styles.badgeStatusPill,
+                                    badge.unlocked ? styles.badgeStatusPillUnlocked : styles.badgeStatusPillLocked,
+                                  ]}
+                                >
+                                  <Ionicons
+                                    name={badge.unlocked ? 'checkmark-circle' : 'lock-closed-outline'}
+                                    size={11}
+                                    color={badge.unlocked ? '#059669' : '#64748B'}
+                                  />
+                                  <Text
+                                    style={[
+                                      styles.badgeStatusText,
+                                      badge.unlocked ? styles.badgeStatusTextUnlocked : styles.badgeStatusTextLocked,
+                                    ]}
+                                  >
+                                    {badge.unlocked ? 'Earned' : 'Locked'}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              <Text style={styles.badgeDescription}>{badge.description}</Text>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+                </View>
               )}
             </View>
           )}
@@ -1551,7 +2843,7 @@ export default function TeacherDashboardScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.modalOverlay}
         >
-          <View style={styles.modalContainer}>
+          <View style={[styles.modalContainer, showModalStudentPreview && isDesktop && styles.modalContainerWide]}>
             {/* Modal Header */}
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
@@ -1560,78 +2852,242 @@ export default function TeacherDashboardScreen() {
                   {editingLesson?.groupTitle} ({editingLesson?.difficulty?.toUpperCase()})
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setEditingLesson(null)} style={styles.modalCloseBtn}>
-                <Ionicons name="close" size={22} color="#64748B" />
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <TouchableOpacity
+                  style={[styles.previewToggleBtn, showModalStudentPreview && styles.previewToggleBtnActive]}
+                  onPress={() => setShowModalStudentPreview(!showModalStudentPreview)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons
+                    name={showModalStudentPreview ? "phone-portrait" : "phone-portrait-outline"}
+                    size={14}
+                    color={showModalStudentPreview ? "#4F46E5" : "#64748B"}
+                  />
+                  <Text style={[styles.previewToggleBtnText, showModalStudentPreview && styles.previewToggleBtnTextActive]}>
+                    {showModalStudentPreview ? "Hide Preview" : "Android Preview"}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={() => setEditingLesson(null)} style={styles.modalCloseBtn}>
+                  <Ionicons name="close" size={22} color="#64748B" />
+                </TouchableOpacity>
+              </View>
             </View>
 
             {/* Modal Content */}
             <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
-              {editSlides.map((slide, sIdx) => (
-                <View key={sIdx} style={styles.slideBox}>
-                  <View style={styles.slideHeader}>
-                    <Text style={styles.slideNumber}>Slide {sIdx + 1}</Text>
-                    {editSlides.length > 1 && (
+              <View style={[styles.editorLayoutRow, (!isDesktop || !showModalStudentPreview) && styles.editorLayoutRowMobile]}>
+                <View style={[styles.editorLayoutColumn, (!showModalStudentPreview || !isDesktop) && { minWidth: '100%' }]}>
+                  {/* Visual Storyboard Filmstrip & Slide Deck Builder */}
+                  <View style={styles.storyboardFilmstripWrapper}>
+                    <View style={styles.filmstripHeaderRow}>
+                      <Text style={styles.filmstripHeaderLabel}>
+                        Lesson Storyboard Deck ({editSlides.length} {editSlides.length === 1 ? 'Slide' : 'Slides'})
+                      </Text>
+                      <Text style={styles.filmstripHeaderHint}>
+                        Tap a slide card to edit
+                      </Text>
+                    </View>
+
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filmstripScroll}>
+                      {editSlides.map((slide, sIdx) => {
+                        const isSelected = (activeEditSlideIndex === sIdx);
+                        return (
+                          <TouchableOpacity
+                            key={sIdx}
+                            style={[styles.filmstripCard, isSelected && styles.filmstripCardActive]}
+                            onPress={() => setActiveEditSlideIndex(sIdx)}
+                            activeOpacity={0.8}
+                          >
+                            <View style={[styles.filmstripBadge, isSelected && styles.filmstripBadgeActive]}>
+                              <Text style={[styles.filmstripBadgeText, isSelected && styles.filmstripBadgeTextActive]}>
+                                Slide {sIdx + 1}
+                              </Text>
+                            </View>
+
+                            {slide.image_url ? (
+                              <Image source={{ uri: resolveImageUrl(slide.image_url) }} style={styles.filmstripThumb} resizeMode="cover" />
+                            ) : (
+                              <View style={styles.filmstripPlaceholderThumb}>
+                                <Ionicons name="image-outline" size={18} color={isSelected ? '#4F46E5' : '#94A3B8'} />
+                              </View>
+                            )}
+
+                            <Text style={[styles.filmstripExcerpt, isSelected && styles.filmstripExcerptActive]} numberOfLines={2}>
+                              {slide.description_text.trim() || '(No reading text)'}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+
                       <TouchableOpacity
-                        onPress={() => setEditSlides(editSlides.filter((_, i) => i !== sIdx))}
+                        style={styles.filmstripAddCard}
+                        onPress={() => {
+                          const nextLen = editSlides.length;
+                          setEditSlides([...editSlides, { description_text: '', image_url: '' }]);
+                          setActiveEditSlideIndex(nextLen);
+                        }}
+                        activeOpacity={0.7}
                       >
-                        <Ionicons name="trash-outline" size={18} color="#DC2626" />
+                        <View style={styles.filmstripAddIconBox}>
+                          <Ionicons name="add" size={20} color="#4F46E5" />
+                        </View>
+                        <Text style={styles.filmstripAddText}>+ Add Slide</Text>
                       </TouchableOpacity>
-                    )}
+                    </ScrollView>
                   </View>
 
-                  <TextInput
-                    style={[styles.input, styles.textArea]}
-                    placeholder="Enter slide reading or story text..."
-                    value={slide.description_text}
-                    onChangeText={(txt) => {
-                      const updated = [...editSlides];
-                      updated[sIdx].description_text = txt;
-                      setEditSlides(updated);
-                    }}
-                    multiline
-                  />
+                  {/* Active Edit Slide Canvas */}
+                  {editSlides[Math.min(activeEditSlideIndex, editSlides.length - 1)] && (() => {
+                    const currentIdx = Math.min(activeEditSlideIndex, editSlides.length - 1);
+                    const currentSlide = editSlides[currentIdx];
+                    return (
+                      <View style={styles.activeSlideCanvas}>
+                        <View style={styles.activeSlideToolbar}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <View style={styles.activeSlideNumberPill}>
+                              <Text style={styles.activeSlideNumberPillText}>
+                                Slide {currentIdx + 1} of {editSlides.length}
+                              </Text>
+                            </View>
+                            <Text style={styles.activeSlideHelpText}>Active Slide Editor</Text>
+                          </View>
 
-                  {slide.image_url ? (
-                    <View style={styles.imagePreviewContainer}>
-                      <Image source={{ uri: slide.image_url }} style={styles.slidePreviewImg} resizeMode="cover" />
-                      <TouchableOpacity
-                        style={styles.removeImgBtn}
-                        onPress={() => {
-                          const updated = [...editSlides];
-                          updated[sIdx].image_url = '';
-                          setEditSlides(updated);
-                        }}
-                      >
-                        <Ionicons name="close-circle" size={20} color="#DC2626" />
-                        <Text style={styles.removeImgText}>Remove Image</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <TouchableOpacity
-                      style={styles.uploadBtn}
-                      onPress={() =>
-                        pickAndUploadImage((url) => {
-                          const updated = [...editSlides];
-                          updated[sIdx].image_url = url;
-                          setEditSlides(updated);
-                        })
-                      }
-                    >
-                      <Ionicons name="image-outline" size={18} color="#2563EB" />
-                      <Text style={styles.uploadBtnText}>Upload Slide Image</Text>
-                    </TouchableOpacity>
-                  )}
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <TouchableOpacity
+                              style={[styles.slideNavBtn, currentIdx === 0 && styles.slideNavBtnDisabled]}
+                              onPress={() => setActiveEditSlideIndex(Math.max(0, currentIdx - 1))}
+                              disabled={currentIdx === 0}
+                            >
+                              <Ionicons name="chevron-back" size={16} color={currentIdx === 0 ? '#94A3B8' : '#4F46E5'} />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              style={[styles.slideNavBtn, currentIdx === editSlides.length - 1 && styles.slideNavBtnDisabled]}
+                              onPress={() => setActiveEditSlideIndex(Math.min(editSlides.length - 1, currentIdx + 1))}
+                              disabled={currentIdx === editSlides.length - 1}
+                            >
+                              <Ionicons name="chevron-forward" size={16} color={currentIdx === editSlides.length - 1 ? '#94A3B8' : '#4F46E5'} />
+                            </TouchableOpacity>
+
+                            {editSlides.length > 1 && (
+                              <TouchableOpacity
+                                style={styles.slideDeleteBtn}
+                                onPress={() => {
+                                  const updated = editSlides.filter((_, i) => i !== currentIdx);
+                                  setEditSlides(updated);
+                                  setActiveEditSlideIndex(Math.max(0, currentIdx - 1));
+                                }}
+                              >
+                                <Ionicons name="trash-outline" size={15} color="#DC2626" />
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+
+                        <Text style={styles.canvasFieldLabel}>Slide Reading & Narration Text</Text>
+                        <TextInput
+                          style={[styles.input, styles.canvasTextArea]}
+                          placeholder="Enter slide story or reading passage for Deaf students..."
+                          value={currentSlide.description_text}
+                          onChangeText={(txt) => {
+                            const updated = [...editSlides];
+                            updated[currentIdx].description_text = txt;
+                            setEditSlides(updated);
+                          }}
+                          multiline
+                        />
+
+                        <Text style={[styles.canvasFieldLabel, { marginTop: 8 }]}>ASL Sign / Visual Story Illustration</Text>
+                        {currentSlide.image_url ? (
+                          <View style={styles.canvasImagePreviewContainer}>
+                            <Image
+                              source={{ uri: resolveImageUrl(currentSlide.image_url) }}
+                              style={styles.canvasSlidePreviewImg}
+                              resizeMode="cover"
+                            />
+                            <View style={styles.canvasImageActionsRow}>
+                              <TouchableOpacity
+                                style={styles.canvasChangeImgBtn}
+                                onPress={() =>
+                                  pickAndUploadImage((url) => {
+                                    const updated = [...editSlides];
+                                    updated[currentIdx].image_url = url;
+                                    setEditSlides(updated);
+                                  })
+                                }
+                              >
+                                <Ionicons name="swap-horizontal" size={15} color="#4F46E5" />
+                                <Text style={styles.canvasChangeImgText}>Replace Image</Text>
+                              </TouchableOpacity>
+
+                              <TouchableOpacity
+                                style={styles.canvasRemoveImgBtn}
+                                onPress={() => {
+                                  const updated = [...editSlides];
+                                  updated[currentIdx].image_url = '';
+                                  setEditSlides(updated);
+                                }}
+                              >
+                                <Ionicons name="trash-outline" size={15} color="#DC2626" />
+                                <Text style={styles.canvasRemoveImgText}>Remove</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        ) : (
+                          <TouchableOpacity
+                            style={styles.canvasUploadDropzone}
+                            onPress={() =>
+                              pickAndUploadImage((url) => {
+                                const updated = [...editSlides];
+                                updated[currentIdx].image_url = url;
+                                setEditSlides(updated);
+                              })
+                            }
+                          >
+                            <View style={styles.canvasUploadIconCircle}>
+                              <Ionicons name="cloud-upload-outline" size={24} color="#4F46E5" />
+                            </View>
+                            <Text style={styles.canvasUploadTitle}>Upload ASL Illustration or Gesture Sign</Text>
+                            <Text style={styles.canvasUploadSubtitle}>PNG, JPG, or GIF image for students</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    );
+                  })()}
                 </View>
-              ))}
 
-              <TouchableOpacity
-                style={styles.addSlideBtn}
-                onPress={() => setEditSlides([...editSlides, { description_text: '', image_url: '' }])}
-              >
-                <Ionicons name="add-circle-outline" size={18} color="#2563EB" />
-                <Text style={styles.addSlideBtnText}>Add Another Slide</Text>
-              </TouchableOpacity>
+                {/* Right Column: Live Student Phone Mockup */}
+                {showModalStudentPreview && (
+                  <View style={[styles.phoneSimulatorColumn, !isDesktop && styles.phoneSimulatorColumnMobile]}>
+                    <View style={styles.phoneSimulatorCard}>
+                      <View style={styles.previewPanelHeader}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <View style={styles.phoneSimulatorLiveDot} />
+                          <Text style={styles.previewPanelTitle}>Live Student Preview</Text>
+                        </View>
+                        <TouchableOpacity
+                          style={styles.previewPanelCloseBtn}
+                          onPress={() => setShowModalStudentPreview(false)}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="close" size={16} color="#64748B" />
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.previewPanelSubtitle}>
+                        Real-time Android view for {editingLesson?.groupTitle} ({editingLesson?.difficulty?.toUpperCase()})
+                      </Text>
+                      {renderStudentPhoneMockup(
+                        editSlides,
+                        activeEditSlideIndex,
+                        editingLesson?.groupTitle || '',
+                        editingLesson?.difficulty || 'easy',
+                        setActiveEditSlideIndex
+                      )}
+                    </View>
+                  </View>
+                )}
+              </View>
             </ScrollView>
 
             {/* Modal Actions */}
@@ -1684,7 +3140,7 @@ export default function TeacherDashboardScreen() {
             {/* Modal Content */}
             {loadingQuizQuestions ? (
               <View style={{ padding: 40, alignItems: 'center' }}>
-                <ActivityIndicator size="large" color="#2563EB" />
+                <ActivityIndicator size="large" color="#4F46E5" />
                 <Text style={{ marginTop: 12, color: '#64748B', fontSize: 13 }}>Loading questions...</Text>
               </View>
             ) : (
@@ -1823,7 +3279,7 @@ export default function TeacherDashboardScreen() {
                             setEditQuizQuestions(updated);
                           }}
                         >
-                          <Ionicons name="add" size={16} color="#2563EB" />
+                          <Ionicons name="add" size={16} color="#4F46E5" />
                           <Text style={styles.addPairBtnText}>Add Matching Pair</Text>
                         </TouchableOpacity>
                       </View>
@@ -1860,7 +3316,7 @@ export default function TeacherDashboardScreen() {
                     ])
                   }
                 >
-                  <Ionicons name="add-circle-outline" size={18} color="#2563EB" />
+                  <Ionicons name="add-circle-outline" size={18} color="#4F46E5" />
                   <Text style={styles.addSlideBtnText}>Add Question</Text>
                 </TouchableOpacity>
               </ScrollView>
@@ -1918,7 +3374,7 @@ export default function TeacherDashboardScreen() {
             {/* Modal Content */}
             {loadingTrash ? (
               <View style={{ padding: 40, alignItems: 'center' }}>
-                <ActivityIndicator size="large" color="#2563EB" />
+                <ActivityIndicator size="large" color="#4F46E5" />
                 <Text style={{ marginTop: 12, color: '#64748B', fontSize: 13 }}>Loading trash items...</Text>
               </View>
             ) : trashItems.length === 0 ? (
@@ -2016,7 +3472,7 @@ export default function TeacherDashboardScreen() {
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Ionicons name="time" size={20} color="#2563EB" />
+                  <Ionicons name="time" size={20} color="#4F46E5" />
                   <Text style={styles.modalTitle}>Teacher Activity History</Text>
                 </View>
                 <Text style={styles.modalSubtitle}>
@@ -2031,7 +3487,7 @@ export default function TeacherDashboardScreen() {
             {/* Modal Content */}
             {loadingHistory ? (
               <View style={{ padding: 40, alignItems: 'center' }}>
-                <ActivityIndicator size="large" color="#2563EB" />
+                <ActivityIndicator size="large" color="#4F46E5" />
                 <Text style={{ marginTop: 12, color: '#64748B', fontSize: 13 }}>Loading activity logs...</Text>
               </View>
             ) : historyItems.length === 0 ? (
@@ -2131,23 +3587,23 @@ const styles = StyleSheet.create({
     width: 54,
   },
   sidebarBrandHeader: {
-    backgroundColor: '#1E293B',
+    backgroundColor: '#1E1B4B',
     paddingHorizontal: 10,
     paddingVertical: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: 1,
-    borderBottomColor: '#0F172A',
+    borderBottomColor: '#312E81',
   },
   sidebarBrandHeaderCollapsed: {
-    backgroundColor: '#1E293B',
+    backgroundColor: '#1E1B4B',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 12,
     paddingHorizontal: 0,
     borderBottomWidth: 1,
-    borderBottomColor: '#0F172A',
+    borderBottomColor: '#312E81',
   },
   sidebarBrandTitle: {
     fontSize: 13,
@@ -2188,9 +3644,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   sidebarItemActive: {
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
     borderWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: '#C7D2FE',
   },
   sidebarItemCollapsed: {
     alignItems: 'center',
@@ -2202,7 +3658,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   sidebarItemCollapsedActive: {
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
   },
   sidebarItemIconBox: {
     width: 28,
@@ -2213,8 +3669,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   sidebarItemIconBoxActive: {
-    backgroundColor: '#2563EB',
-    shadowColor: '#2563EB',
+    backgroundColor: '#4F46E5',
+    shadowColor: '#4F46E5',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.2,
     shadowRadius: 2,
@@ -2227,7 +3683,7 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   sidebarItemTextActive: {
-    color: '#1D4ED8',
+    color: '#4338CA',
     fontWeight: '700',
   },
   sidebarFooter: {
@@ -2288,9 +3744,9 @@ const styles = StyleSheet.create({
     color: '#1E293B',
   },
   subjectBadge: {
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
     borderWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: '#C7D2FE',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 6,
@@ -2298,7 +3754,7 @@ const styles = StyleSheet.create({
   subjectBadgeText: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#1D4ED8',
+    color: '#4338CA',
     letterSpacing: 0.5,
   },
   topicChip: {
@@ -2313,8 +3769,8 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   topicChipActive: {
-    backgroundColor: '#2563EB',
-    borderColor: '#1D4ED8',
+    backgroundColor: '#4F46E5',
+    borderColor: '#4338CA',
   },
   topicChipText: {
     fontSize: 13,
@@ -2337,8 +3793,8 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   lessonGroupChipActive: {
-    backgroundColor: '#2563EB',
-    borderColor: '#1D4ED8',
+    backgroundColor: '#4F46E5',
+    borderColor: '#4338CA',
   },
   lessonGroupChipText: {
     fontSize: 13,
@@ -2387,8 +3843,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   quizTierBtnActive: {
-    backgroundColor: '#2563EB',
-    borderColor: '#1D4ED8',
+    backgroundColor: '#4F46E5',
+    borderColor: '#4338CA',
   },
   quizTierBtnDisabled: {
     backgroundColor: '#F1F5F9',
@@ -2412,7 +3868,7 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   quizTierSubtextActive: {
-    color: '#BFDBFE',
+    color: '#C7D2FE',
   },
   quizTierSubtextDisabled: {
     color: '#94A3B8',
@@ -2472,7 +3928,8 @@ const styles = StyleSheet.create({
     borderBottomColor: 'transparent',
   },
   tabItemActive: {
-    borderBottomColor: '#2563EB',
+    borderBottomColor: '#4F46E5',
+    backgroundColor: 'rgba(79, 70, 229, 0.04)',
   },
   tabLabel: {
     fontSize: 12,
@@ -2480,7 +3937,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   tabLabelActive: {
-    color: '#2563EB',
+    color: '#4F46E5',
     fontWeight: 'bold',
   },
   contentContainer: {
@@ -2549,8 +4006,8 @@ const styles = StyleSheet.create({
     borderColor: '#CBD5E1',
   },
   tierBtnActive: {
-    backgroundColor: '#2563EB',
-    borderColor: '#1D4ED8',
+    backgroundColor: '#4F46E5',
+    borderColor: '#4338CA',
   },
   tierBtnText: {
     fontSize: 12,
@@ -2559,6 +4016,286 @@ const styles = StyleSheet.create({
   },
   tierBtnTextActive: {
     color: '#FFFFFF',
+  },
+  // Visual Storyboard Filmstrip & Slide Deck Styles
+  storyboardFilmstripWrapper: {
+    marginBottom: 16,
+  },
+  filmstripHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
+  },
+  filmstripHeaderLabel: {
+    fontSize: 13.5,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  filmstripHeaderHint: {
+    fontSize: 11,
+    color: '#64748B',
+  },
+  filmstripScroll: {
+    flexDirection: 'row',
+    paddingVertical: 4,
+  },
+  filmstripCard: {
+    width: 120,
+    height: 130,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+    padding: 8,
+    marginRight: 10,
+    justifyContent: 'space-between',
+  },
+  filmstripCardActive: {
+    borderColor: '#4F46E5',
+    backgroundColor: '#EEF2FF',
+    shadowColor: '#4F46E5',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  filmstripBadge: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    alignSelf: 'flex-start',
+  },
+  filmstripBadgeActive: {
+    backgroundColor: '#4F46E5',
+  },
+  filmstripBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  filmstripBadgeTextActive: {
+    color: '#FFFFFF',
+  },
+  filmstripThumb: {
+    width: '100%',
+    height: 48,
+    borderRadius: 6,
+    backgroundColor: '#E2E8F0',
+    marginVertical: 4,
+  },
+  filmstripPlaceholderThumb: {
+    width: '100%',
+    height: 48,
+    borderRadius: 6,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 4,
+  },
+  filmstripExcerpt: {
+    fontSize: 10.5,
+    color: '#64748B',
+    lineHeight: 14,
+  },
+  filmstripExcerptActive: {
+    color: '#312E81',
+    fontWeight: '600',
+  },
+  filmstripAddCard: {
+    width: 100,
+    height: 130,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#C7D2FE',
+    borderStyle: 'dashed',
+    backgroundColor: '#F8FAFC',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    gap: 6,
+  },
+  filmstripAddIconBox: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#EEF2FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filmstripAddText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#4F46E5',
+  },
+  activeSlideCanvas: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 16,
+    marginTop: 6,
+    marginBottom: 16,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  activeSlideToolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    marginBottom: 14,
+  },
+  activeSlideNumberPill: {
+    backgroundColor: '#4F46E5',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  activeSlideNumberPillText: {
+    color: '#FFFFFF',
+    fontSize: 11.5,
+    fontWeight: '700',
+  },
+  activeSlideHelpText: {
+    fontSize: 12,
+    color: '#64748B',
+  },
+  slideNavBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 6,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  slideNavBtnDisabled: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#E2E8F0',
+    opacity: 0.5,
+  },
+  slideDeleteBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 6,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  canvasFieldLabel: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#334155',
+    marginBottom: 6,
+  },
+  canvasTextArea: {
+    minHeight: 85,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    padding: 12,
+    fontSize: 13.5,
+    color: '#0F172A',
+    textAlignVertical: 'top',
+  },
+  canvasImagePreviewContainer: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 10,
+    alignItems: 'center',
+  },
+  canvasSlidePreviewImg: {
+    width: '100%',
+    height: 180,
+    borderRadius: 8,
+    backgroundColor: '#E2E8F0',
+  },
+  canvasImageActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    width: '100%',
+    marginTop: 8,
+    gap: 10,
+  },
+  canvasChangeImgBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  canvasChangeImgText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#4F46E5',
+  },
+  canvasRemoveImgBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  canvasRemoveImgText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#DC2626',
+  },
+  canvasUploadDropzone: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#C7D2FE',
+    borderStyle: 'dashed',
+    paddingVertical: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  canvasUploadIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#EEF2FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  canvasUploadTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#4F46E5',
+  },
+  canvasUploadSubtitle: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
   },
   slideBox: {
     backgroundColor: '#F8FAFC',
@@ -2577,15 +4314,15 @@ const styles = StyleSheet.create({
   slideNumber: {
     fontSize: 13,
     fontWeight: 'bold',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   uploadBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
     borderWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: '#C7D2FE',
     borderStyle: 'dashed',
     borderRadius: 8,
     paddingVertical: 10,
@@ -2594,7 +4331,7 @@ const styles = StyleSheet.create({
   uploadBtnText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   imagePreviewContainer: {
     alignItems: 'center',
@@ -2630,13 +4367,18 @@ const styles = StyleSheet.create({
   addSlideBtnText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   primaryBtn: {
-    backgroundColor: '#2563EB',
-    borderRadius: 8,
+    backgroundColor: '#4F46E5',
+    borderRadius: 10,
     paddingVertical: 12,
     alignItems: 'center',
+    shadowColor: '#4F46E5',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.22,
+    shadowRadius: 4,
+    elevation: 3,
   },
   primaryBtnDisabled: {
     opacity: 0.6,
@@ -2739,8 +4481,8 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   typeBtnActive: {
-    backgroundColor: '#EFF6FF',
-    borderColor: '#2563EB',
+    backgroundColor: '#EEF2FF',
+    borderColor: '#4F46E5',
   },
   typeBtnText: {
     fontSize: 12,
@@ -2748,7 +4490,7 @@ const styles = StyleSheet.create({
     color: '#475569',
   },
   typeBtnTextActive: {
-    color: '#2563EB',
+    color: '#4F46E5',
     fontWeight: 'bold',
   },
   optionRow: {
@@ -2767,13 +4509,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   radioActive: {
-    borderColor: '#2563EB',
+    borderColor: '#4F46E5',
   },
   radioInner: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: '#2563EB',
+    backgroundColor: '#4F46E5',
   },
   matchingRow: {
     flexDirection: 'row',
@@ -2789,7 +4531,7 @@ const styles = StyleSheet.create({
   addPairBtnText: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   quizCard: {
     backgroundColor: '#F8FAFC',
@@ -2820,26 +4562,232 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     marginBottom: 16,
+    flexWrap: 'wrap',
   },
   metricCard: {
     flex: 1,
+    minWidth: 140,
     backgroundColor: '#FFFFFF',
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#E2E8F0',
     padding: 14,
     alignItems: 'center',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 2,
+    elevation: 1,
   },
   metricValue: {
     fontSize: 22,
     fontWeight: 'bold',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   metricLabel: {
     fontSize: 11,
     color: '#64748B',
     marginTop: 4,
     textAlign: 'center',
+  },
+  metricIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  analyticsLoadingBox: {
+    paddingVertical: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  analyticsLoadingText: {
+    fontSize: 13,
+    color: '#64748B',
+    fontWeight: '500',
+  },
+  analyticsSectionHeader: {
+    marginBottom: 14,
+  },
+  analyticsSectionHint: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  curriculumGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  curriculumSubjectCard: {
+    flex: 1,
+    minWidth: 200,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    gap: 10,
+  },
+  curriculumIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  curriculumSubjectName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  curriculumSubjectStats: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  directoryControlsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 14,
+  },
+  directorySearchInputWrap: {
+    flex: 1,
+    minWidth: 220,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 10,
+    height: 38,
+    gap: 8,
+  },
+  directorySearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#0F172A',
+    paddingVertical: 0,
+  },
+  sortPillsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  sortPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  sortPillActive: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#C7D2FE',
+  },
+  sortPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  sortPillTextActive: {
+    color: '#4F46E5',
+    fontWeight: '700',
+  },
+  directoryEmptyBox: {
+    paddingVertical: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  studentDirectoryCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    marginBottom: 10,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  studentAvatarCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  studentAvatarText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#4F46E5',
+  },
+  studentName: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#0F172A',
+  },
+  studentUsername: {
+    fontSize: 12,
+    color: '#64748B',
+  },
+  studentMetricsPillsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  studentPillItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  studentPillText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  inspectStudentBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: '#EEF2FF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  inspectStudentBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#4F46E5',
   },
   studentCard: {
     flexDirection: 'row',
@@ -2851,11 +4799,6 @@ const styles = StyleSheet.create({
     borderColor: '#E2E8F0',
     padding: 12,
     marginBottom: 8,
-  },
-  studentName: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#0F172A',
   },
   studentSub: {
     fontSize: 12,
@@ -2875,6 +4818,474 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
     color: '#92400E',
+  },
+
+  /* Option A Dossier Styles */
+  dossierContainer: {
+    marginBottom: 20,
+  },
+  dossierBreadcrumbBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  dossierBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  dossierBackBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#4F46E5',
+  },
+  dossierHeaderBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  dossierHeaderBadgeText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  dossierProfileCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 18,
+    marginBottom: 14,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  dossierProfileTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  dossierAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 2,
+    borderColor: '#C7D2FE',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
+  },
+  dossierAvatarText: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#4F46E5',
+  },
+  dossierStudentName: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  dossierStudentUser: {
+    fontSize: 12.5,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  dossierQuickStatsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  dossierQuickStatCard: {
+    flex: 1,
+    minWidth: 110,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 10,
+    alignItems: 'center',
+  },
+  dossierQuickStatValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  dossierQuickStatLabel: {
+    fontSize: 10.5,
+    color: '#64748B',
+    marginTop: 3,
+    textAlign: 'center',
+  },
+  dossierSegmentedBar: {
+    flexDirection: 'row',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    padding: 4,
+    marginBottom: 14,
+    gap: 4,
+  },
+  dossierSegmentTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 9,
+    borderRadius: 8,
+  },
+  dossierSegmentTabActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  dossierSegmentTabText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  dossierSegmentTabTextActive: {
+    color: '#4F46E5',
+    fontWeight: '700',
+  },
+  dossierTabContent: {
+    gap: 10,
+  },
+  attemptsFilterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  filterChipActive: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#C7D2FE',
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  filterChipTextActive: {
+    color: '#4F46E5',
+    fontWeight: '700',
+  },
+  attemptCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    marginBottom: 8,
+  },
+  attemptCardTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  attemptQuizTitle: {
+    fontSize: 14.5,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  attemptTopicText: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  diffBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  diffBadgeText: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  attemptCardBottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  attemptScoreGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  attemptScoreText: {
+    fontSize: 13,
+    color: '#475569',
+  },
+  attemptAccPercent: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  attemptStatusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  attemptStatusPassed: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#A7F3D0',
+  },
+  attemptStatusFailed: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+  },
+  attemptStatusText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  attemptMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#F8FAFC',
+  },
+  attemptMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  attemptMetaText: {
+    fontSize: 11,
+    color: '#94A3B8',
+  },
+  bktBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#EEF2FF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    padding: 14,
+    marginBottom: 6,
+  },
+  bktBannerIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bktBannerTitle: {
+    fontSize: 13.5,
+    fontWeight: '800',
+    color: '#3730A3',
+  },
+  bktBannerDesc: {
+    fontSize: 11.5,
+    color: '#4338CA',
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  bktSummaryRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 6,
+  },
+  bktSummaryCard: {
+    flex: 1,
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 10,
+    alignItems: 'center',
+  },
+  bktSummaryValue: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  bktSummaryLabel: {
+    fontSize: 10.5,
+    fontWeight: '600',
+    color: '#64748B',
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  kcCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    marginBottom: 8,
+  },
+  kcCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  kcTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  kcTopic: {
+    fontSize: 11.5,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  kcStatusPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+  },
+  kcStatusPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  kcProgressBarTrack: {
+    height: 8,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  kcProgressBarFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  kcFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  kcMasteryPercent: {
+    fontSize: 12,
+    color: '#334155',
+  },
+  kcCountsText: {
+    fontSize: 11,
+    color: '#64748B',
+  },
+  badgesSummaryBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FEF3C7',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    padding: 12,
+    marginBottom: 6,
+  },
+  badgesSummaryBannerText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#92400E',
+  },
+  badgesGrid: {
+    gap: 8,
+  },
+  badgeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 12,
+    gap: 12,
+  },
+  badgeCardLocked: {
+    backgroundColor: '#F8FAFC',
+    opacity: 0.75,
+  },
+  badgeIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  badgeTitleLocked: {
+    color: '#64748B',
+  },
+  badgeStatusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  badgeStatusPillUnlocked: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#A7F3D0',
+  },
+  badgeStatusPillLocked: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#E2E8F0',
+  },
+  badgeStatusText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+  badgeStatusTextUnlocked: {
+    color: '#059669',
+  },
+  badgeStatusTextLocked: {
+    color: '#64748B',
+  },
+  badgeDescription: {
+    fontSize: 11.5,
+    color: '#64748B',
+    marginTop: 2,
   },
   sidebarActionBtn: {
     flexDirection: 'row',
@@ -2928,6 +5339,190 @@ const styles = StyleSheet.create({
     backgroundColor: '#E2E8F0',
     marginVertical: 6,
   },
+  pulseContainer: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  pulseHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    marginBottom: 12,
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  pulseTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginBottom: 4,
+  },
+  pulseTitle: {
+    fontSize: 17,
+    fontWeight: 'bold',
+    color: '#0F172A',
+  },
+  pulseActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    gap: 5,
+  },
+  pulseActiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+  },
+  pulseActiveBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#047857',
+  },
+  pulseSubtitle: {
+    fontSize: 12.5,
+    color: '#64748B',
+    lineHeight: 17,
+  },
+  pulseHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pulseActionBtnSecondary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    backgroundColor: '#EEF2FF',
+    gap: 5,
+  },
+  pulseActionBtnSecondaryText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#4F46E5',
+  },
+  pulseActionBtnPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: '#4F46E5',
+    gap: 5,
+    shadowColor: '#4F46E5',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  pulseActionBtnPrimaryText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  pulseCardsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  pulseCard: {
+    flex: 1,
+    minWidth: 260,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: 10,
+  },
+  pulseCardAmber: {
+    backgroundColor: '#FFFBEB',
+    borderColor: '#FDE68A',
+  },
+  pulseCardEmerald: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#A7F3D0',
+  },
+  pulseCardIndigo: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#C7D2FE',
+  },
+  pulseCardIconAmber: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#FEF3C7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pulseCardIconEmerald: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#D1FAE5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pulseCardIconIndigo: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#E0E7FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pulseCardTitleAmber: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#92400E',
+  },
+  pulseCardTitleEmerald: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#065F46',
+  },
+  pulseCardTitleIndigo: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#3730A3',
+  },
+  pulseCardSubAmber: {
+    fontSize: 11,
+    color: '#B45309',
+    marginTop: 2,
+  },
+  pulseCardSubEmerald: {
+    fontSize: 11,
+    color: '#047857',
+    marginTop: 2,
+  },
+  pulseCardSubIndigo: {
+    fontSize: 11,
+    color: '#4338CA',
+    marginTop: 2,
+  },
   curriculumTopCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 10,
@@ -2956,22 +5551,27 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#BFDBFE',
-    backgroundColor: '#EFF6FF',
+    borderColor: '#C7D2FE',
+    backgroundColor: '#EEF2FF',
     gap: 4,
   },
   refreshBtnText: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   curriculumStoryCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 10,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#E2E8F0',
     marginBottom: 14,
     overflow: 'hidden',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
   },
   storyCardHeader: {
     flexDirection: 'row',
@@ -2981,6 +5581,21 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#F1F5F9',
     backgroundColor: '#FAFAFA',
+  },
+  storyCardHeaderCollapsed: {
+    borderBottomWidth: 0,
+    backgroundColor: '#FFFFFF',
+  },
+  expandChevronBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expandChevronBadgeActive: {
+    backgroundColor: '#EEF2FF',
   },
   storyCardTitle: {
     fontSize: 15,
@@ -3092,16 +5707,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
     borderWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: '#C7D2FE',
     marginTop: 4,
     alignSelf: 'flex-start',
   },
   actionBtnSecondaryText: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   tierActionsRight: {
     flexDirection: 'row',
@@ -3187,12 +5802,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
   },
   tierCreateBtnText: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   viewCurriculumLinkBtn: {
     flexDirection: 'row',
@@ -3200,16 +5815,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
     paddingVertical: 12,
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: '#C7D2FE',
     marginTop: 12,
   },
   viewCurriculumLinkText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   modalOverlay: {
     flex: 1,
@@ -3308,7 +5923,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   itemTypeBadgeGroup: {
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
   },
   itemTypeBadgeLesson: {
     backgroundColor: '#F0FDF4',
@@ -3404,9 +6019,9 @@ const styles = StyleSheet.create({
     borderColor: '#A7F3D0',
   },
   historyBadgeUpdate: {
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#EEF2FF',
     borderWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: '#C7D2FE',
   },
   historyBadgeDelete: {
     backgroundColor: '#FEF2F2',
@@ -3429,7 +6044,7 @@ const styles = StyleSheet.create({
     color: '#059669',
   },
   historyBadgeTextUpdate: {
-    color: '#2563EB',
+    color: '#4F46E5',
   },
   historyBadgeTextDelete: {
     color: '#DC2626',
@@ -3473,5 +6088,394 @@ const styles = StyleSheet.create({
     color: '#64748B',
     textAlign: 'center',
     maxWidth: 360,
+  },
+
+  // Split Editor & Interactive Student Phone Mockup
+  editorTopBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  previewToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  previewToggleBtnActive: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#C7D2FE',
+  },
+  previewToggleBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  previewToggleBtnTextActive: {
+    color: '#4F46E5',
+    fontWeight: '700',
+  },
+  editorLayoutRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 24,
+  },
+  editorLayoutRowMobile: {
+    flexDirection: 'column',
+    gap: 20,
+  },
+  editorLayoutColumn: {
+    flex: 1,
+    minWidth: 0,
+  },
+  phoneSimulatorColumn: {
+    width: 320,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? {
+      position: 'sticky' as any,
+      top: 16,
+      alignSelf: 'flex-start',
+    } : {}),
+  },
+  phoneSimulatorColumnMobile: {
+    width: '100%',
+    marginTop: 16,
+  },
+  phoneSimulatorCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 16,
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 16,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  previewPanelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginBottom: 2,
+  },
+  previewPanelTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  previewPanelCloseBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewPanelSubtitle: {
+    fontSize: 11,
+    color: '#64748B',
+    marginBottom: 12,
+    width: '100%',
+    textAlign: 'left',
+  },
+  phoneSimulatorSticky: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  phoneSimulatorHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 2,
+  },
+  phoneSimulatorLiveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#10B981',
+  },
+  phoneSimulatorHeaderTitle: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  phoneSimulatorHeaderSubtitle: {
+    fontSize: 11,
+    color: '#64748B',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  modalContainerWide: {
+    maxWidth: 1040,
+  },
+
+  // Android Phone Mockup Hardware & Screen
+  phoneMockupFrame: {
+    width: 285,
+    borderRadius: 24,
+    backgroundColor: '#0F172A',
+    padding: 7,
+    borderWidth: 2.5,
+    borderColor: '#334155',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 8,
+    alignSelf: 'center',
+  },
+  phoneScreenContent: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 18,
+    padding: 10,
+    paddingBottom: 0,
+    minHeight: 460,
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+  },
+  phoneStatusBar: {
+    position: 'relative',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingHorizontal: 4,
+    height: 18,
+  },
+  phoneStatusTime: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#0F172A',
+    width: 44,
+  },
+  phonePunchHoleCameraWrapper: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'none' as any,
+  },
+  phonePunchHoleCamera: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#020617',
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  phoneStatusIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    width: 44,
+    justifyContent: 'flex-end',
+  },
+  phoneStudentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  phoneStoryTitle: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#0F172A',
+  },
+  phoneStorySubtitle: {
+    fontSize: 9.5,
+    color: '#64748B',
+    fontWeight: '500',
+  },
+  phoneTierPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: '#F1F5F9',
+  },
+  phoneTierPillEasy: {
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  phoneTierPillMedium: {
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  phoneTierPillHard: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  phoneTierPillText: {
+    fontSize: 8.5,
+    fontWeight: 'bold',
+  },
+  phoneTierPillTextEasy: {
+    color: '#059669',
+  },
+  phoneTierPillTextMedium: {
+    color: '#D97706',
+  },
+  phoneTierPillTextHard: {
+    color: '#DC2626',
+  },
+  phoneProgressContainer: {
+    marginBottom: 6,
+  },
+  phoneProgressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  phoneProgressBarBg: {
+    height: 4,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  phoneProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#4F46E5',
+    borderRadius: 2,
+  },
+  phoneProgressText: {
+    fontSize: 9.5,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  phoneStageBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: 8,
+  },
+  phoneStageBadgeText: {
+    fontSize: 9.5,
+    fontWeight: '700',
+  },
+  phoneSlideImg: {
+    width: '100%',
+    height: 120,
+    borderRadius: 8,
+    backgroundColor: '#E2E8F0',
+    marginBottom: 6,
+  },
+  phoneImgPlaceholder: {
+    width: '100%',
+    height: 105,
+    borderRadius: 8,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1.5,
+    borderColor: '#C7D2FE',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+    padding: 8,
+  },
+  phoneImgPlaceholderText: {
+    fontSize: 9.5,
+    color: '#6366F1',
+    fontWeight: '500',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  phoneNarrationCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 6,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+  },
+  phoneNarrationLabel: {
+    fontSize: 8.5,
+    fontWeight: '800',
+    color: '#4F46E5',
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  phoneNarrationText: {
+    fontSize: 11,
+    color: '#1E293B',
+    lineHeight: 15,
+  },
+  phoneBottomControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 'auto',
+    paddingTop: 4,
+  },
+  phoneNavBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  phoneNavBtnDisabled: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#E2E8F0',
+    opacity: 0.4,
+  },
+  phoneNextBtn: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 7,
+    backgroundColor: '#4F46E5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  phoneNextBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11.5,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  androidNavBar: {
+    backgroundColor: '#0F172A',
+    height: 32,
+    marginHorizontal: -10,
+    marginBottom: 0,
+    borderBottomLeftRadius: 18,
+    borderBottomRightRadius: 18,
+    flexDirection: 'row',
+    justifyContent: 'space-evenly',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginTop: 6,
+  },
+  androidNavBtn: {
+    width: 36,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

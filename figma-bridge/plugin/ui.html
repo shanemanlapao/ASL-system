@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      padding: 14px;
+      margin: 0;
+      background: #1e1e1e;
+      color: #f3f3f3;
+      font-size: 12px;
+    }
+    .status-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #2a2a2a;
+      margin-bottom: 12px;
+    }
+    .indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #f87171;
+    }
+    .indicator.connected {
+      background: #4ade80;
+    }
+    .log-box {
+      background: #141414;
+      border-radius: 6px;
+      padding: 8px;
+      height: 120px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 11px;
+      color: #9ca3af;
+      white-space: pre-wrap;
+    }
+    button {
+      margin-top: 8px;
+      width: 100%;
+      background: #3b82f6;
+      border: none;
+      color: white;
+      padding: 7px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    button:hover {
+      background: #2563eb;
+    }
+  </style>
+</head>
+<body>
+  <div class="status-box">
+    <div id="dot" class="indicator"></div>
+    <span id="statusText">Connecting to Bridge (ws://localhost:4322)...</span>
+  </div>
+
+  <div class="log-box" id="logs">Waiting for bridge connection...</div>
+
+  <button onclick="reconnect()">Reconnect</button>
+
+  <script>
+    let ws;
+    const dot = document.getElementById('dot');
+    const statusText = document.getElementById('statusText');
+    const logs = document.getElementById('logs');
+
+    function log(msg) {
+      logs.textContent += '\n' + msg;
+      logs.scrollTop = logs.scrollHeight;
+    }
+
+    function connect() {
+      try {
+        ws = new WebSocket('ws://localhost:4322');
+        ws.onopen = () => {
+          dot.className = 'indicator connected';
+          statusText.textContent = 'Connected & Listening for AI commands';
+          log('[Connected] Ready to draw designs!');
+        };
+        ws.onmessage = (event) => {
+          log('[Received] Design instruction');
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'CLEAR_CANVAS') {
+              parent.postMessage({ pluginMessage: { type: 'CLEAR_CANVAS' } }, '*');
+            } else if (data.spec) {
+              parent.postMessage({ pluginMessage: { type: 'RENDER_SPEC', spec: data.spec, clearBeforeRender: data.clearBeforeRender } }, '*');
+            } else {
+              parent.postMessage({ pluginMessage: { type: 'RENDER_SPEC', spec: data } }, '*');
+            }
+          } catch(e) {
+            log('[Error] Invalid JSON: ' + e.message);
+          }
+        };
+        ws.onclose = () => {
+          dot.className = 'indicator';
+          statusText.textContent = 'Disconnected. Is server.js running?';
+          log('[Closed] WebSocket closed.');
+        };
+        ws.onerror = () => {
+          dot.className = 'indicator';
+          statusText.textContent = 'Connection Error.';
+          log('[Error] Cannot reach ws://localhost:4322');
+        };
+      } catch (e) {
+        log('[Error] ' + e.message);
+      }
+    }
+
+    function reconnect() {
+      if (ws) ws.close();
+      connect();
+    }
+
+    connect();
+
+    // Listen from plugin sandbox
+    window.onmessage = (event) => {
+      const msg = event.data.pluginMessage;
+      if (msg && msg.type === 'STATUS_LOG') {
+        log('[Canvas] ' + msg.text);
+      }
+    };
+  </script>
+</body>
+</html>

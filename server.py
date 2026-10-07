@@ -1,5 +1,6 @@
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -37,7 +38,41 @@ app = FastAPI()
 # Mount static folder uploads to serve files
 UPLOAD_DIR = "assets/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
+
+@app.get("/static/{filename}")
+def serve_uploaded_file(filename: str):
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    ext = os.path.splitext(filename)[1].lower()
+    media_type = "image/jpeg"
+    if ext == ".png":
+        media_type = "image/png"
+    elif ext == ".gif":
+        media_type = "image/gif"
+    elif ext == ".webp":
+        media_type = "image/webp"
+    elif ext in [".jpg", ".jpeg"]:
+        media_type = "image/jpeg"
+    else:
+        # Check magic bytes for extensionless uploads
+        try:
+            with open(file_path, "rb") as f:
+                header = f.read(12)
+                if header.startswith(b'\x89PNG\r\n\x1a\n'):
+                    media_type = "image/png"
+                elif header.startswith(b'GIF87a') or header.startswith(b'GIF89a'):
+                    media_type = "image/gif"
+                elif header.startswith(b'RIFF') and header[8:12] == b'WEBP':
+                    media_type = "image/webp"
+                elif header.startswith(b'\xff\xd8\xff'):
+                    media_type = "image/jpeg"
+        except Exception:
+            pass
+    return FileResponse(file_path, media_type=media_type)
+
+app.mount("/static-files", StaticFiles(directory=UPLOAD_DIR), name="static-files")
 
 # Allow all origins so React Native (device/emulator) can reach the server
 app.add_middleware(
@@ -732,7 +767,7 @@ def get_lesson_groups(topic_id: str):
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT id, topic_id, title, order_index, created_at FROM lesson_groups WHERE topic_id = %s AND COALESCE(is_deleted, FALSE) = FALSE ORDER BY order_index ASC, id ASC",
+            "SELECT id, topic_id, title, order_index, created_at FROM lesson_groups WHERE topic_id = %s AND COALESCE(is_deleted, FALSE) = FALSE ORDER BY created_at DESC NULLS LAST, id DESC",
             (topic_id,),
         )
         groups = cur.fetchall()
@@ -1022,14 +1057,27 @@ def update_lesson_slides(lesson_id: int, req: UpdateLessonSlidesRequest):
 
 
 @app.post("/admin/upload")
-def upload_image(file: UploadFile = File(...)):
-    ext = os.path.splitext(file.filename)[1]
+def upload_image(request: Request, file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if not ext and file.content_type:
+        if "png" in file.content_type:
+            ext = ".png"
+        elif "gif" in file.content_type:
+            ext = ".gif"
+        elif "webp" in file.content_type:
+            ext = ".webp"
+        else:
+            ext = ".jpg"
+    if not ext:
+        ext = ".jpg"
+
     unique_filename = f"{uuid.uuid4()}{ext}"
     file_path = os.path.join(UPLOAD_DIR, unique_filename)
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        url = f"http://10.0.28.67:8000/static/{unique_filename}"
+        base_url = str(request.base_url).rstrip('/')
+        url = f"{base_url}/static/{unique_filename}"
         return {"success": True, "url": url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -3254,6 +3302,7 @@ def get_leaderboard(user_id: Optional[int] = None):
             FROM users u
             LEFT JOIN student_profiles sp ON u.id = sp.user_id
             LEFT JOIN student_streaks ss ON u.id = ss.user_id
+            WHERE COALESCE(u.role, 'student') = 'student'
             GROUP BY u.id, u.name, u.username, ss.current_streak
             ORDER BY total_stars DESC, current_streak DESC, u.id ASC
             LIMIT 20
@@ -3288,13 +3337,14 @@ def get_leaderboard(user_id: Optional[int] = None):
 
 
 @app.get("/admin/analytics/overview")
+@app.get("/admin/analytics")
 def get_admin_analytics_overview():
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # 1. Total Students
-        cur.execute("SELECT COUNT(*) AS total FROM users")
+        # 1. Total Students (excluding teachers and admins)
+        cur.execute("SELECT COUNT(*) AS total FROM users WHERE COALESCE(role, 'student') = 'student'")
         total_students = cur.fetchone()["total"]
 
         # 2. Total Quiz Attempts & Class Avg Accuracy
@@ -3346,7 +3396,7 @@ def get_admin_analytics_overview():
             for r in cur.fetchall()
         ]
 
-        # 5. Student Roster with progress
+        # 5. Student Roster with progress (excluding teachers and admins)
         cur.execute("""
             SELECT 
                 u.id AS user_id,
@@ -3360,6 +3410,7 @@ def get_admin_analytics_overview():
             LEFT JOIN student_profiles sp ON u.id = sp.user_id
             LEFT JOIN student_streaks ss ON u.id = ss.user_id
             LEFT JOIN student_quiz_attempts sqa ON u.id = sqa.user_id
+            WHERE COALESCE(u.role, 'student') = 'student'
             GROUP BY u.id, u.name, u.username, ss.current_streak
             ORDER BY total_stars DESC, u.id ASC
         """)
@@ -3386,6 +3437,66 @@ def get_admin_analytics_overview():
             "topic_stats": topic_stats,
             "weak_kcs": weak_kcs,
             "student_roster": roster
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/teacher/student/{user_id}/quiz-attempts")
+def get_student_quiz_attempts(user_id: int):
+    """
+    Returns full chronological history of a student's quiz attempts
+    with quiz title, topic, difficulty, score, total questions, accuracy, passed, and timestamps.
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT 
+                sqa.id AS attempt_id,
+                sqa.quiz_id,
+                COALESCE(q.title, 'Curriculum Quiz #' || sqa.quiz_id) AS quiz_title,
+                COALESCE(q.topic_id, 'story-grammar') AS topic_id,
+                COALESCE(q.difficulty, 'easy') AS difficulty,
+                sqa.score,
+                sqa.total_questions,
+                ROUND((sqa.score::FLOAT / NULLIF(sqa.total_questions, 0) * 100)::numeric, 1) AS accuracy_pct,
+                (sqa.score::FLOAT / NULLIF(sqa.total_questions, 0) >= 0.70) AS passed,
+                sqa.time_spent_seconds,
+                sqa.completed_at,
+                sqa.started_at
+            FROM student_quiz_attempts sqa
+            LEFT JOIN quizzes q ON sqa.quiz_id = q.id
+            WHERE sqa.user_id = %s
+            ORDER BY sqa.completed_at DESC NULLS LAST, sqa.id DESC
+        """, (user_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        attempts = []
+        for r in rows:
+            attempts.append({
+                "attempt_id": r["attempt_id"],
+                "quiz_id": r["quiz_id"],
+                "quiz_title": r["quiz_title"],
+                "topic_id": r["topic_id"],
+                "difficulty": r["difficulty"],
+                "score": r["score"],
+                "total_questions": r["total_questions"],
+                "accuracy_pct": float(r["accuracy_pct"]) if r["accuracy_pct"] is not None else 0.0,
+                "passed": bool(r["passed"]),
+                "time_spent_seconds": r["time_spent_seconds"] or 0,
+                "completed_at": str(r["completed_at"]) if r["completed_at"] else None,
+                "started_at": str(r["started_at"]) if r["started_at"] else None,
+            })
+
+        return {
+            "user_id": user_id,
+            "total_attempts": len(attempts),
+            "passed_count": sum(1 for a in attempts if a["passed"]),
+            "failed_count": sum(1 for a in attempts if not a["passed"]),
+            "attempts": attempts
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
