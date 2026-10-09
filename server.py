@@ -1,6 +1,6 @@
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, File, UploadFile, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -13,7 +13,10 @@ import os
 import shutil
 import uuid
 import random
-from datetime import datetime
+import time
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta, date
 
 # Password hashing
 pwd_context = CryptContext(schemes=["sha256_crypt"], deprecated="auto")
@@ -39,13 +42,61 @@ app = FastAPI()
 UPLOAD_DIR = "assets/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ── Step 1 Security: In-Memory Sliding Window Rate Limiter Engine ─────────────
+class SlidingWindowRateLimiter:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._requests = defaultdict(list)
+        self._auth_failures = defaultdict(list)
+        self._lockouts = {}
+
+    def _clean_old(self, timestamps: list, window_seconds: float, now: float) -> list:
+        return [t for t in timestamps if now - t < window_seconds]
+
+    def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> tuple[bool, int]:
+        now = time.time()
+        with self._lock:
+            # Check if key is currently locked out (e.g. 60s brute-force cooldown)
+            if key in self._lockouts:
+                until = self._lockouts[key]
+                if now < until:
+                    return False, int(until - now) + 1
+                else:
+                    del self._lockouts[key]
+
+            timestamps = self._clean_old(self._requests[key], window_seconds, now)
+            if len(timestamps) >= max_requests:
+                retry_after = int(window_seconds - (now - timestamps[0])) + 1
+                return False, max(1, retry_after)
+
+            timestamps.append(now)
+            self._requests[key] = timestamps
+            return True, 0
+
+    def record_auth_failure(self, ip: str, max_failures: int = 5, window_seconds: int = 60, lock_seconds: int = 60):
+        now = time.time()
+        with self._lock:
+            failures = self._clean_old(self._auth_failures[ip], window_seconds, now)
+            failures.append(now)
+            self._auth_failures[ip] = failures
+            if len(failures) >= max_failures:
+                self._lockouts[f"auth_{ip}"] = now + lock_seconds
+
+rate_limiter = SlidingWindowRateLimiter()
+
+# ── Step 1 Security: Path Traversal Fix on Static File Serving ────────────────
 @app.get("/static/{filename}")
 def serve_uploaded_file(filename: str):
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    safe_filename = os.path.basename(filename)
+    base_dir = os.path.abspath(UPLOAD_DIR)
+    file_path = os.path.abspath(os.path.join(base_dir, safe_filename))
+
+    if not file_path.startswith(base_dir):
+        raise HTTPException(status_code=403, detail="Access denied.")
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    
-    ext = os.path.splitext(filename)[1].lower()
+
+    ext = os.path.splitext(safe_filename)[1].lower()
     media_type = "image/jpeg"
     if ext == ".png":
         media_type = "image/png"
@@ -82,6 +133,107 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Step 1 Security & Tiered Rate Limiting Middleware ─────────────────────────
+@app.middleware("http")
+async def security_and_rate_limit_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+
+    path = request.url.path
+    method = request.method
+
+    # Bypass rate limits for health checks and static image views
+    if path in ["/health", "/favicon.ico"] or (path.startswith("/static") and method == "GET"):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        return response
+
+    # Middleware check for File Upload size limit (5MB)
+    if method == "POST" and (path.startswith("/admin/upload") or "/upload-avatar" in path):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > 5 * 1024 * 1024:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "File size exceeds maximum allowed limit of 5MB."}
+                    )
+            except ValueError:
+                pass
+
+    # Tier Matching Matrix
+    max_req = 120
+    window = 60
+    key = f"gen_{client_ip}"
+
+    # Tier 1: Auth & Account (5 req/min, 60s brute-force cooldown)
+    if path in ["/login", "/register"] or path.endswith("/change-password"):
+        max_req = 5
+        window = 60
+        key = f"auth_{client_ip}"
+
+    # Tier 2: AI Neural Translation (10 req/min)
+    elif path == "/translate":
+        max_req = 10
+        window = 60
+        key = f"ai_{client_ip}"
+
+    # Tier 3: Anti-Cheat Quiz Submissions (1 req / 15s)
+    elif (path.startswith("/quiz/session/") and path.endswith("/complete")) or \
+         path == "/quiz/offline-sync" or \
+         "/daily-quizzes/" in path or \
+         "/repair-streak" in path:
+        max_req = 1
+        window = 15
+        key = f"anticheat_{client_ip}_{path}"
+
+    # Tier 4: Media Uploads (5 req/min)
+    elif "/upload-avatar" in path or path == "/admin/upload":
+        max_req = 5
+        window = 60
+        key = f"upload_{client_ip}"
+
+    # Tier 5: Heavy Admin Analytics (3 req/min)
+    elif path in ["/admin/fit-bkt-model", "/admin/analytics", "/admin/analytics/overview"]:
+        max_req = 3
+        window = 60
+        key = f"analytics_{client_ip}"
+
+    # Tier 6: Destructive Admin Actions (15 req/min)
+    elif (path.startswith("/admin/") and method in ["DELETE", "POST"]) or \
+         path.startswith("/admin/trash"):
+        max_req = 15
+        window = 60
+        key = f"admin_dest_{client_ip}"
+
+    allowed, retry_after = rate_limiter.is_allowed(key, max_req, window)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+            content={
+                "detail": f"Too many requests. Please wait {retry_after} seconds before trying again.",
+                "retry_after": retry_after
+            }
+        )
+
+    response = await call_next(request)
+
+    # Track failed logins -> trigger 60s cooldown if 5 failures in 60s
+    if path == "/login" and response.status_code in [400, 401]:
+        rate_limiter.record_auth_failure(client_ip, max_failures=5, window_seconds=60, lock_seconds=60)
+
+    # Security Headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+
+    return response
 
 # ── Database connection ───────────────────────────────────────────────────────
 def get_db():
@@ -303,6 +455,10 @@ def init_db():
                 details TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS avatar_url TEXT,
+                ADD COLUMN IF NOT EXISTS last_avatar_changed_at TIMESTAMP;
         """)
 
         # Ensure Admin account exists with requested password 'wvsuadmin123'
@@ -681,7 +837,7 @@ def login(req: LoginRequest):
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT id, name, username, password_hash, role FROM users WHERE username = %s",
+            "SELECT id, name, username, password_hash, role, avatar_url, last_avatar_changed_at FROM users WHERE username = %s",
             (req.username.strip().lower(),),
         )
         user = cur.fetchone()
@@ -697,7 +853,9 @@ def login(req: LoginRequest):
                 "id": user["id"],
                 "name": user["name"],
                 "username": user["username"],
-                "role": user.get("role") or "student"
+                "role": user.get("role") or "student",
+                "avatar_url": user.get("avatar_url"),
+                "last_avatar_changed_at": user.get("last_avatar_changed_at").isoformat() if user.get("last_avatar_changed_at") else None,
             },
         }
     except HTTPException:
@@ -1068,8 +1226,8 @@ def upload_image(request: Request, file: UploadFile = File(...)):
             ext = ".webp"
         else:
             ext = ".jpg"
-    if not ext:
-        ext = ".jpg"
+    if not ext or ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
+        raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP, and GIF images are allowed.")
 
     unique_filename = f"{uuid.uuid4()}{ext}"
     file_path = os.path.join(UPLOAD_DIR, unique_filename)
@@ -1729,21 +1887,45 @@ def offline_sync_quiz(body: QuizOfflineSyncRequest):
                 )
                 unlocked_medium = passed and difficulty == "easy"
                 unlocked_hard = passed and difficulty == "medium"
-            else:
-                score_col = f"{difficulty}_best_score"
-                passed_col = f"{difficulty}_passed"
+                if difficulty == "easy":
+                    score_col = "easy_best_score"
+                    passed_col = "easy_passed"
+                elif difficulty == "medium":
+                    score_col = "medium_best_score"
+                    passed_col = "medium_passed"
+                else:
+                    score_col = "hard_best_score"
+                    passed_col = "hard_passed"
+
                 curr_best = prog.get(score_col) or 0.0
                 new_best = max(curr_best, accuracy_pct)
                 already_passed = bool(prog.get(passed_col))
                 new_passed = already_passed or passed
 
-                cur.execute(
-                    f"""UPDATE student_lesson_progress
-                       SET {score_col} = %s, {passed_col} = %s,
-                           attempts_count = attempts_count + 1, last_updated = NOW()
-                       WHERE user_id = %s AND lesson_group_id = %s""",
-                    (new_best, new_passed, user_id, lesson_group_id)
-                )
+                if difficulty == "easy":
+                    cur.execute(
+                        """UPDATE student_lesson_progress
+                           SET easy_best_score = %s, easy_passed = %s,
+                               attempts_count = attempts_count + 1, last_updated = NOW()
+                           WHERE user_id = %s AND lesson_group_id = %s""",
+                        (new_best, new_passed, user_id, lesson_group_id)
+                    )
+                elif difficulty == "medium":
+                    cur.execute(
+                        """UPDATE student_lesson_progress
+                           SET medium_best_score = %s, medium_passed = %s,
+                               attempts_count = attempts_count + 1, last_updated = NOW()
+                           WHERE user_id = %s AND lesson_group_id = %s""",
+                        (new_best, new_passed, user_id, lesson_group_id)
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE student_lesson_progress
+                           SET hard_best_score = %s, hard_passed = %s,
+                               attempts_count = attempts_count + 1, last_updated = NOW()
+                           WHERE user_id = %s AND lesson_group_id = %s""",
+                        (new_best, new_passed, user_id, lesson_group_id)
+                    )
 
                 if difficulty == "easy" and passed and not already_passed:
                     unlocked_medium = True
@@ -1927,7 +2109,7 @@ def get_student_report(user_id: int):
                FROM student_quiz_attempts a
                LEFT JOIN quizzes q ON a.quiz_id = q.id
                WHERE a.user_id = %s AND a.completed_at IS NOT NULL
-               ORDER BY a.completed_at DESC LIMIT 10""",
+               ORDER BY a.completed_at DESC LIMIT 50""",
             (user_id,)
         )
         recent = cur.fetchall()
@@ -2178,7 +2360,7 @@ def get_admin_users():
         cur.execute(
             """SELECT id, name, username, COALESCE(role, 'student') as role,
                       COALESCE(plain_password, 'Not available (Legacy user)') as password,
-                      created_at
+                      created_at, avatar_url, last_avatar_changed_at
                FROM users
                ORDER BY CASE WHEN role = 'admin' THEN 1 WHEN role = 'teacher' THEN 2 ELSE 3 END, username ASC"""
         )
@@ -3126,7 +3308,7 @@ def get_student_profile_info(user_id: int):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT id, name, username FROM users WHERE id = %s", (user_id,))
+        cur.execute("SELECT id, name, username, avatar_url, last_avatar_changed_at FROM users WHERE id = %s", (user_id,))
         u = cur.fetchone()
         if not u:
             raise HTTPException(status_code=404, detail="User not found.")
@@ -3140,9 +3322,117 @@ def get_student_profile_info(user_id: int):
             "id": u["id"],
             "name": u["name"],
             "username": u["username"],
+            "avatar_url": u.get("avatar_url"),
+            "last_avatar_changed_at": u.get("last_avatar_changed_at").isoformat() if u.get("last_avatar_changed_at") else None,
             "total_stars": total_stars,
             "streak": streak
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/student/{user_id}/avatar-status")
+def get_student_avatar_status(user_id: int):
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT avatar_url, last_avatar_changed_at FROM users WHERE id = %s", (user_id,))
+        u = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not u:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        last_changed = u.get("last_avatar_changed_at")
+        now = datetime.now()
+        can_change = True
+        remaining_seconds = 0
+        next_change_allowed_at = None
+
+        if last_changed:
+            elapsed = (now - last_changed).total_seconds()
+            one_day_seconds = 86400  # 24 hours
+            if elapsed < one_day_seconds:
+                can_change = False
+                remaining_seconds = int(one_day_seconds - elapsed)
+                next_change_allowed_at = (last_changed + timedelta(days=1)).isoformat()
+
+        return {
+            "avatar_url": u.get("avatar_url"),
+            "last_avatar_changed_at": last_changed.isoformat() if last_changed else None,
+            "can_change": can_change,
+            "remaining_seconds": remaining_seconds,
+            "next_change_allowed_at": next_change_allowed_at
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/student/{user_id}/upload-avatar")
+def upload_student_avatar(user_id: int, request: Request, file: UploadFile = File(...)):
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT avatar_url, last_avatar_changed_at FROM users WHERE id = %s", (user_id,))
+        u = cur.fetchone()
+        if not u:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        last_changed = u.get("last_avatar_changed_at")
+        now = datetime.now()
+        if last_changed:
+            elapsed = (now - last_changed).total_seconds()
+            one_day_seconds = 86400  # 24 hours
+            if elapsed < one_day_seconds:
+                remaining_sec = int(one_day_seconds - elapsed)
+                hours = remaining_sec // 3600
+                minutes = (remaining_sec % 3600) // 60
+                cur.close()
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Profile picture can only be changed once every 24 hours. Next change in {hours}h {minutes}m."
+                )
+
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if not ext and file.content_type:
+            if "png" in file.content_type:
+                ext = ".png"
+            elif "gif" in file.content_type:
+                ext = ".gif"
+            elif "webp" in file.content_type:
+                ext = ".webp"
+            else:
+                ext = ".jpg"
+        if not ext or ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
+            raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP, and GIF images are allowed.")
+
+        unique_filename = f"avatar_{user_id}_{uuid.uuid4().hex[:8]}{ext}"
+        file_path = os.path.join(UPLOAD_DIR, unique_filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        base_url = str(request.base_url).rstrip('/')
+        avatar_url = f"{base_url}/static/{unique_filename}"
+
+        cur.execute(
+            "UPDATE users SET avatar_url = %s, last_avatar_changed_at = %s WHERE id = %s",
+            (avatar_url, now, user_id)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {
+            "success": True,
+            "message": "Profile picture updated! It is now locked for 24 hours.",
+            "avatar_url": avatar_url,
+            "last_avatar_changed_at": now.isoformat()
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3296,6 +3586,7 @@ def get_leaderboard(user_id: Optional[int] = None):
                 u.id AS user_id,
                 u.name,
                 u.username,
+                u.avatar_url,
                 COALESCE(SUM(sp.total_stars), 0) AS total_stars,
                 COALESCE(ss.current_streak, 0) AS current_streak,
                 COALESCE(SUM(sp.quizzes_completed), 0) AS quizzes_completed
@@ -3303,7 +3594,7 @@ def get_leaderboard(user_id: Optional[int] = None):
             LEFT JOIN student_profiles sp ON u.id = sp.user_id
             LEFT JOIN student_streaks ss ON u.id = ss.user_id
             WHERE COALESCE(u.role, 'student') = 'student'
-            GROUP BY u.id, u.name, u.username, ss.current_streak
+            GROUP BY u.id, u.name, u.username, u.avatar_url, ss.current_streak
             ORDER BY total_stars DESC, current_streak DESC, u.id ASC
             LIMIT 20
         """)
@@ -3316,6 +3607,7 @@ def get_leaderboard(user_id: Optional[int] = None):
                 "user_id": r["user_id"],
                 "name": r["name"],
                 "username": r["username"],
+                "avatar_url": r.get("avatar_url"),
                 "total_stars": int(r["total_stars"]),
                 "current_streak": int(r["current_streak"]),
                 "quizzes_completed": int(r["quizzes_completed"]),
@@ -3402,6 +3694,7 @@ def get_admin_analytics_overview():
                 u.id AS user_id,
                 u.name,
                 u.username,
+                u.avatar_url,
                 COALESCE(SUM(sp.total_stars), 0) AS total_stars,
                 COALESCE(ss.current_streak, 0) AS current_streak,
                 COALESCE(COUNT(sqa.id), 0) AS attempts_count,
@@ -3411,7 +3704,7 @@ def get_admin_analytics_overview():
             LEFT JOIN student_streaks ss ON u.id = ss.user_id
             LEFT JOIN student_quiz_attempts sqa ON u.id = sqa.user_id
             WHERE COALESCE(u.role, 'student') = 'student'
-            GROUP BY u.id, u.name, u.username, ss.current_streak
+            GROUP BY u.id, u.name, u.username, u.avatar_url, ss.current_streak
             ORDER BY total_stars DESC, u.id ASC
         """)
         roster = [
@@ -3419,6 +3712,7 @@ def get_admin_analytics_overview():
                 "user_id": r["user_id"],
                 "name": r["name"],
                 "username": r["username"],
+                "avatar_url": r.get("avatar_url"),
                 "total_stars": int(r["total_stars"]),
                 "current_streak": int(r["current_streak"]),
                 "attempts_count": int(r["attempts_count"]),

@@ -6,6 +6,8 @@ type User = {
   name: string;
   username: string;
   role?: string;
+  avatar_url?: string | null;
+  last_avatar_changed_at?: string | null;
 };
 
 type AuthContextType = {

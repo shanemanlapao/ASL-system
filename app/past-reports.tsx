@@ -1,12 +1,23 @@
+import React, { useState, useCallback, useMemo } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  ScrollView,
+  TouchableOpacity,
+  ActivityIndicator,
+  Platform,
+  UIManager,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
-import React, { useState, useCallback } from "react";
-import { ActivityIndicator, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, UIManager, View } from "react-native";
 import { useAuth } from "../context/AuthContext";
 import { API_URL } from "../context/config";
+import { COLORS } from "../context/theme";
 
 // Enable LayoutAnimation on Android
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
@@ -23,19 +34,40 @@ interface AttemptRecord {
   completed_at: string;
 }
 
+interface GroupedPastAttempt {
+  key: string;
+  quiz_title: string;
+  topic_id: string;
+  difficulty: string;
+  totalTries: number;
+  bestAccuracy: number;
+  bestScore: number;
+  totalQuestions: number;
+  latestDate: string;
+  attempts: AttemptRecord[];
+}
+
 export default function PastReportsScreen() {
   const { user } = useAuth();
   const userId = user?.id || 1;
 
   const [attempts, setAttempts] = useState<AttemptRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({});
+
+  const toggleExpand = (key: string) => {
+    setExpandedKeys((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
 
   const fetchAttempts = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/student/${userId}/past-attempts`);
       if (res.ok) {
         const data = await res.json();
-        const list = Array.isArray(data) ? data : (data.attempts || []);
+        const list = Array.isArray(data) ? data : data.attempts || [];
         setAttempts(list);
       }
     } catch (err) {
@@ -51,78 +83,235 @@ export default function PastReportsScreen() {
     }, [fetchAttempts])
   );
 
+  // Group attempts by Quiz Title & Difficulty
+  const groupedAttempts: GroupedPastAttempt[] = useMemo(() => {
+    if (!attempts || attempts.length === 0) return [];
+    const map: Record<string, GroupedPastAttempt> = {};
+
+    for (const att of attempts) {
+      const key = `${att.quiz_title}___${att.difficulty}`;
+      if (!map[key]) {
+        map[key] = {
+          key,
+          quiz_title: att.quiz_title,
+          topic_id: att.topic_id,
+          difficulty: att.difficulty,
+          totalTries: 0,
+          bestAccuracy: typeof att.accuracy === "number" ? att.accuracy : 0,
+          bestScore: att.score,
+          totalQuestions: att.total_questions,
+          latestDate: att.completed_at || "Recent",
+          attempts: [],
+        };
+      }
+      map[key].attempts.push(att);
+      map[key].totalTries += 1;
+      const acc = typeof att.accuracy === "number" ? att.accuracy : 0;
+      if (acc > map[key].bestAccuracy) {
+        map[key].bestAccuracy = acc;
+        map[key].bestScore = att.score;
+        map[key].totalQuestions = att.total_questions;
+      }
+    }
+
+    return Object.values(map);
+  }, [attempts]);
+
+  const getDifficultyColor = (diff: string) => {
+    const d = (diff || "easy").toLowerCase();
+    if (d === "hard") return { text: COLORS.hard, bg: COLORS.hardBg, border: COLORS.hardBorder };
+    if (d === "medium") return { text: COLORS.medium, bg: COLORS.mediumBg, border: COLORS.mediumBorder };
+    return { text: COLORS.easy, bg: COLORS.easyBg, border: COLORS.easyBorder };
+  };
+
+  const formatTime = (seconds: number) => {
+    if (!seconds || seconds < 60) return `${seconds || 0}s`;
+    const mins = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return remainder > 0 ? `${mins}m ${remainder}s` : `${mins}m`;
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
+      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#0284C7" />
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => router.back()}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Ionicons name="arrow-back" size={24} color={COLORS.primary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Past Reports</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>Past Reports</Text>
+          <Text style={styles.headerSub}>Review your completed quiz records</Text>
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         {loading ? (
-          <ActivityIndicator size="large" color="#0284C7" style={{ marginTop: 40 }} />
-        ) : attempts.length === 0 ? (
+          <View style={styles.centerContainer}>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+            <Text style={{ marginTop: 12, color: COLORS.textSecondary, fontWeight: "500" }}>
+              Loading past records...
+            </Text>
+          </View>
+        ) : groupedAttempts.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <Ionicons name="document-text-outline" size={64} color="#9CA3AF" />
+            <View style={styles.emptyIconCircle}>
+              <Ionicons name="document-text-outline" size={48} color={COLORS.textSecondary} />
+            </View>
             <Text style={styles.emptyTitle}>No Quiz Reports Yet</Text>
             <Text style={styles.emptySub}>
               Complete quizzes from Story Grammar or English Literacy to track your progress and performance here!
             </Text>
-            <TouchableOpacity style={styles.emptyBtn} onPress={() => router.push("/(tabs)/home" as any)}>
+            <TouchableOpacity
+              style={styles.emptyBtn}
+              onPress={() => router.push("/(tabs)/home" as any)}
+              activeOpacity={0.85}
+            >
               <Text style={styles.emptyBtnText}>Start a Lesson</Text>
             </TouchableOpacity>
           </View>
         ) : (
-          attempts.map((att) => {
-            const diffColor = att.difficulty === 'hard' ? '#EF4444' : att.difficulty === 'medium' ? '#F59E0B' : '#10B981';
-            const diffBg = att.difficulty === 'hard' ? '#FEE2E2' : att.difficulty === 'medium' ? '#FEF3C7' : '#DCFCE7';
-            const accuracyVal = typeof att.accuracy === 'number' ? att.accuracy : 0;
-            const isPassed = accuracyVal >= 70;
-            const starsEarned = isPassed ? (att.difficulty === 'hard' ? 30 : att.difficulty === 'medium' ? 20 : 10) : 0;
+          <View style={styles.listContainer}>
+            <View style={styles.summaryBar}>
+              <Text style={styles.summaryBarTitle}>
+                {groupedAttempts.length} Unique {groupedAttempts.length === 1 ? "Quiz" : "Quizzes"}
+              </Text>
+              <Text style={styles.summaryBarSub}>
+                {attempts.length} Total Attempts
+              </Text>
+            </View>
 
-            return (
-              <View key={att.id} style={styles.reportCard}>
-                <View style={styles.reportHeader}>
-                  <View style={styles.dateRow}>
-                    <View style={styles.calendarIconBg}>
-                      <Ionicons name={isPassed ? "checkmark-circle" : "close-circle"} size={22} color={isPassed ? "#10B981" : "#EF4444"} />
-                    </View>
-                    <View style={styles.dateInfo}>
-                      <Text style={styles.dateText}>{att.quiz_title}</Text>
-                      <Text style={styles.quizCountText}>{att.completed_at || 'Completed'}</Text>
-                    </View>
-                    <View style={[styles.diffBadge, { backgroundColor: diffBg }]}>
-                      <Text style={[styles.diffBadgeText, { color: diffColor }]}>
-                        {att.difficulty.toUpperCase()}
-                      </Text>
-                    </View>
-                  </View>
+            {groupedAttempts.map((group) => {
+              const isExpanded = !!expandedKeys[group.key];
+              const diffStyle = getDifficultyColor(group.difficulty);
+              const isPassed = group.bestAccuracy >= 70;
 
-                  <View style={styles.summaryStatsRow}>
-                    <View style={[styles.summaryStat, { backgroundColor: '#FFF5F5' }]}>
-                      <Ionicons name="star" size={16} color="#FF8A65" />
-                      <Text style={styles.summaryStatValue}>+{starsEarned}</Text>
-                      <Text style={styles.summaryStatLabel}>Stars</Text>
+              return (
+                <View key={group.key} style={styles.groupCard}>
+                  {/* Single Accordion Header */}
+                  <TouchableOpacity
+                    style={styles.cardHeader}
+                    onPress={() => toggleExpand(group.key)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.quizTitle}>{group.quiz_title}</Text>
+
+                      <View style={styles.badgeRow}>
+                        {/* Difficulty */}
+                        <View
+                          style={[
+                            styles.diffBadge,
+                            { backgroundColor: diffStyle.bg, borderColor: diffStyle.border },
+                          ]}
+                        >
+                          <Text style={[styles.diffBadgeText, { color: diffStyle.text }]}>
+                            {group.difficulty.toUpperCase()}
+                          </Text>
+                        </View>
+
+                        {/* Total Tries Badge */}
+                        <View style={styles.triesBadge}>
+                          <Ionicons name="repeat" size={12} color={COLORS.primary} />
+                          <Text style={styles.triesBadgeText}>
+                            {group.totalTries} {group.totalTries === 1 ? "Try" : "Tries"}
+                          </Text>
+                        </View>
+                      </View>
                     </View>
 
-                    <View style={[styles.summaryStat, { backgroundColor: '#F0F9FF' }]}>
-                      <Ionicons name="scan-circle-outline" size={16} color="#0284C7" />
-                      <Text style={styles.summaryStatValue}>{accuracyVal}%</Text>
-                      <Text style={styles.summaryStatLabel}>Accuracy</Text>
-                    </View>
+                    {/* Best Score & Chevron */}
+                    <View style={styles.scoreRight}>
+                      <View style={styles.scoreTextCol}>
+                        <Text
+                          style={[
+                            styles.bestScoreVal,
+                            isPassed ? { color: COLORS.success } : { color: COLORS.error },
+                          ]}
+                        >
+                          {group.bestScore}/{group.totalQuestions}
+                        </Text>
+                        <Text style={styles.bestScoreSub}>{group.bestAccuracy}% Best</Text>
+                      </View>
 
-                    <View style={[styles.summaryStat, { backgroundColor: '#F0FDF4' }]}>
-                      <Ionicons name="time-outline" size={16} color="#0D9488" />
-                      <Text style={styles.summaryStatValue}>{att.time_spent_seconds || 0}s</Text>
-                      <Text style={styles.summaryStatLabel}>Time</Text>
+                      <View style={styles.chevronBox}>
+                        <Ionicons
+                          name={isExpanded ? "chevron-up" : "chevron-down"}
+                          size={18}
+                          color={COLORS.primary}
+                        />
+                      </View>
                     </View>
-                  </View>
+                  </TouchableOpacity>
+
+                  {/* Expanded Breakdown */}
+                  {isExpanded && (
+                    <View style={styles.historyDrawer}>
+                      <View style={styles.historyDrawerHeader}>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                          <Ionicons name="time-outline" size={13} color={COLORS.textSecondary} />
+                          <Text style={styles.historyDrawerTitle}>
+                            Attempt Breakdown ({group.totalTries} {group.totalTries === 1 ? "try" : "tries"})
+                          </Text>
+                        </View>
+                        <Text style={styles.historyDrawerSub}>Newest to Oldest</Text>
+                      </View>
+
+                      {group.attempts.map((att, attIdx) => {
+                        const tryNum = group.attempts.length - attIdx;
+                        const attPassed = (att.accuracy || 0) >= 70;
+                        const isLatest = attIdx === 0;
+
+                        return (
+                          <View
+                            key={att.id || attIdx}
+                            style={[
+                              styles.historyRow,
+                              attIdx !== group.attempts.length - 1 && styles.historyRowBorder,
+                            ]}
+                          >
+                            <View style={styles.historyLeft}>
+                              <View style={styles.historyIndexBadge}>
+                                <Text style={styles.historyIndexText}>#{tryNum}</Text>
+                              </View>
+                              <View>
+                                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                                  <Text style={styles.historyTryText}>Try {tryNum}</Text>
+                                  {isLatest && (
+                                    <View style={styles.latestTag}>
+                                      <Text style={styles.latestTagText}>Latest</Text>
+                                    </View>
+                                  )}
+                                </View>
+                                <Text style={styles.historyMetaText}>
+                                  Time: {formatTime(att.time_spent_seconds)}
+                                  {att.completed_at ? ` • ${att.completed_at.slice(0, 10)}` : ""}
+                                </Text>
+                              </View>
+                            </View>
+
+                            <View style={styles.historyRight}>
+                              <Text
+                                style={[
+                                  styles.historyScore,
+                                  attPassed ? { color: COLORS.success } : { color: COLORS.error },
+                                ]}
+                              >
+                                {att.score}/{att.total_questions} ({att.accuracy}%)
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
-              </View>
-            );
-          })
+              );
+            })}
+          </View>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -132,185 +321,277 @@ export default function PastReportsScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#F8F9FA",
+    backgroundColor: COLORS.background,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
-    padding: 20,
-    paddingTop: 10,
-    backgroundColor: "#F8F9FA",
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === "android" ? 14 : 10,
+    paddingBottom: 12,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
   backButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#E0F2FE",
+    backgroundColor: COLORS.primaryLight,
     justifyContent: "center",
     alignItems: "center",
-    marginRight: 16,
+    marginRight: 14,
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: "bold",
-    color: "#1F2937",
+    fontSize: 20,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
+  },
+  headerSub: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 1,
   },
   container: {
-    padding: 20,
+    padding: 16,
+    paddingBottom: 40,
   },
-  reportCard: {
-    backgroundColor: "white",
+  centerContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingTop: 60,
+  },
+  summaryBar: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+    paddingHorizontal: 2,
+  },
+  summaryBarTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
+  },
+  summaryBarSub: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: COLORS.textSecondary,
+    backgroundColor: COLORS.cardSecondary,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  listContainer: {
+    gap: 12,
+  },
+  groupCard: {
+    backgroundColor: COLORS.card,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#E5E7EB",
-    overflow: "hidden", // Important for smooth animation
+    borderColor: COLORS.border,
+    overflow: "hidden",
+    elevation: 2,
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
   },
-  reportHeader: {
-    padding: 16,
-  },
-  dateRow: {
+  cardHeader: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 16,
+    padding: 14,
+    minHeight: 64,
   },
-  calendarIconBg: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    backgroundColor: "#E0F2FE",
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 12,
+  quizTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+    marginBottom: 6,
   },
-  dateInfo: {
-    flex: 1,
-  },
-  dateText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1F2937",
-  },
-  quizCountText: {
-    fontSize: 12,
-    color: "#6B7280",
-    marginTop: 2,
-  },
-  summaryStatsRow: {
+  badgeRow: {
     flexDirection: "row",
-    justifyContent: "flex-start",
-  },
-  summaryStat: {
-    borderRadius: 12,
-    padding: 12,
     alignItems: "center",
-    minWidth: 70,
-    marginRight: 12,
-  },
-  summaryStatValue: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#1F2937",
-    marginTop: 4,
-  },
-  summaryStatLabel: {
-    fontSize: 10,
-    color: "#6B7280",
-  },
-  expandedContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: "#F3F4F6",
-    marginBottom: 16,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1F2937",
-    marginBottom: 12,
-  },
-  detailsCard: {
-    backgroundColor: "#FAF9F6",
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 20,
-  },
-  subjectRow: {
-    marginBottom: 16,
-  },
-  subjectRowHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  subjectName: {
-    fontSize: 14,
-    fontWeight: "500",
-    color: "#1F2937",
-  },
-  subjectStats: {
-    fontSize: 12,
-    color: "#9CA3AF",
-  },
-  percentageBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  percentageText: {
-    fontWeight: "bold",
-    fontSize: 14,
-  },
-  topicRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  topicSubject: {
-    fontSize: 12,
-    color: "#9CA3AF",
+    gap: 8,
   },
   diffBadge: {
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 3,
     borderRadius: 8,
-    alignSelf: 'flex-start',
+    borderWidth: 1,
   },
   diffBadgeText: {
     fontSize: 11,
-    fontWeight: 'bold',
+    fontWeight: "700",
+  },
+  triesBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  triesBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+  scoreRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginLeft: 8,
+  },
+  scoreTextCol: {
+    alignItems: "flex-end",
+  },
+  bestScoreVal: {
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  bestScoreSub: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    fontWeight: "600",
+    marginTop: 1,
+  },
+  chevronBox: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  // Expanded history drawer
+  historyDrawer: {
+    backgroundColor: "#F8FAFC",
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  historyDrawerHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderLight,
+  },
+  historyDrawerTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.textSecondary,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  historyDrawerSub: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  historyRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+  },
+  historyRowBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#EDF2F7",
+  },
+  historyLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  historyIndexBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: "#E2E8F0",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  historyIndexText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
+  },
+  historyTryText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.textPrimary,
+  },
+  latestTag: {
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  latestTagText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+  historyMetaText: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  historyRight: {
+    alignItems: "flex-end",
+  },
+  historyScore: {
+    fontSize: 14,
+    fontWeight: "700",
   },
   emptyContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     paddingVertical: 60,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
+  },
+  emptyIconCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: COLORS.cardSecondary,
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 16,
   },
   emptyTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: '#1F2937',
-    marginTop: 16,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
     marginBottom: 8,
   },
   emptySub: {
     fontSize: 14,
-    color: '#6B7280',
-    textAlign: 'center',
+    color: COLORS.textSecondary,
+    textAlign: "center",
     lineHeight: 20,
     marginBottom: 24,
   },
   emptyBtn: {
-    backgroundColor: '#0284C7',
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 14,
+    elevation: 3,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
   },
   emptyBtnText: {
-    color: 'white',
+    color: "white",
     fontSize: 15,
-    fontWeight: 'bold',
+    fontWeight: "700",
   },
 });

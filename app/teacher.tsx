@@ -2282,9 +2282,13 @@ export default function TeacherDashboardScreen() {
                           >
                             {/* Student Avatar */}
                             <View style={styles.studentAvatarCircle}>
-                              <Text style={styles.studentAvatarText}>
-                                {(student.name || 'Student').slice(0, 2).toUpperCase()}
-                              </Text>
+                              {student.avatar_url ? (
+                                <Image source={{ uri: student.avatar_url }} style={styles.studentAvatarImg} />
+                              ) : (
+                                <Text style={styles.studentAvatarText}>
+                                  {(student.name || 'Student').slice(0, 2).toUpperCase()}
+                                </Text>
+                              )}
                             </View>
 
                             {/* Main Info */}
@@ -2358,9 +2362,13 @@ export default function TeacherDashboardScreen() {
                   <View style={styles.dossierProfileCard}>
                     <View style={styles.dossierProfileTop}>
                       <View style={styles.dossierAvatar}>
-                        <Text style={styles.dossierAvatarText}>
-                          {(selectedStudentForInspect.name || 'S').slice(0, 2).toUpperCase()}
-                        </Text>
+                        {selectedStudentForInspect.avatar_url ? (
+                          <Image source={{ uri: selectedStudentForInspect.avatar_url }} style={styles.dossierAvatarImg} />
+                        ) : (
+                          <Text style={styles.dossierAvatarText}>
+                            {(selectedStudentForInspect.name || 'S').slice(0, 2).toUpperCase()}
+                          </Text>
+                        )}
                       </View>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.dossierStudentName}>
@@ -4738,6 +4746,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
+    overflow: 'hidden',
+  },
+  studentAvatarImg: {
+    width: '100%',
+    height: '100%',
   },
   studentAvatarText: {
     fontSize: 15,
@@ -4890,6 +4903,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 14,
+    overflow: 'hidden',
+  },
+  dossierAvatarImg: {
+    width: '100%',
+    height: '100%',
   },
   dossierAvatarText: {
     fontSize: 18,

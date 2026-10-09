@@ -1,11 +1,26 @@
+import React, { useEffect, useState, useRef } from 'react';
+import {
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  Modal,
+  Image,
+  ActivityIndicator,
+  Animated,
+  Platform,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
-import React, { useEffect, useState, useRef } from 'react';
-import { SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View, Modal, Image, ActivityIndicator, Animated, Platform } from "react-native";
 import * as Haptics from 'expo-haptics';
 import { useAuth } from "../../context/AuthContext";
 import { API_URL } from "../../context/config";
+import { COLORS } from "../../context/theme";
 import { getCachedTopicLessons, getCachedStudentProgress } from "../../context/OfflineCache";
+
+// --- Types -------------------------------------------------------------------
 
 interface Slide {
   slide_index: number;
@@ -23,41 +38,42 @@ interface DBLesson {
 }
 
 const THEME_COLORS: Record<string, { primary: string; light: string; border: string }> = {
-  'story-grammar': { primary: '#7C3AED', light: '#EDE9FE', border: '#DDD6FE' },
-  'mathematics': { primary: '#2563EB', light: '#DBEAFE', border: '#BFDBFE' },
-  'technology-and-livelihood-education': { primary: '#D97706', light: '#FEF3C7', border: '#FDE68A' },
-  'araling-panlipunan': { primary: '#059669', light: '#D1FAE5', border: '#A7F3D0' },
+  'story-grammar': { primary: COLORS.storyGrammar, light: COLORS.storyGrammarBg, border: '#DDD6FE' },
+  'mathematics': { primary: COLORS.mathematics, light: COLORS.mathematicsBg, border: '#BFDBFE' },
+  'technology-and-livelihood-education': { primary: COLORS.tle, light: COLORS.tleBg, border: '#FDE68A' },
+  'araling-panlipunan': { primary: COLORS.aralingPanlipunan, light: COLORS.aralingPanlipunanBg, border: '#A7F3D0' },
 };
 
+// DHH Story Grammar signposts for narrative structure
 const getStoryGrammarBadge = (index: number) => {
   switch (index) {
     case 0:
       return {
         label: "Character & Setting",
-        icon: "person-outline" as const,
-        color: "#7C3AED",
-        bgColor: "#EDE9FE",
+        icon: "person" as const,
+        color: COLORS.primary,
+        bgColor: COLORS.primaryLight,
       };
     case 1:
       return {
         label: "Problem & Challenge",
-        icon: "alert-circle-outline" as const,
+        icon: "alert-circle" as const,
         color: "#D97706",
         bgColor: "#FEF3C7",
       };
     case 2:
       return {
         label: "Action & Rules",
-        icon: "build-outline" as const,
+        icon: "construct" as const,
         color: "#2563EB",
-        bgColor: "#DBEAFE",
+        bgColor: "#EFF6FF",
       };
     default:
       return {
         label: "Resolution & Outcome",
-        icon: "checkmark-circle-outline" as const,
+        icon: "checkmark-circle" as const,
         color: "#059669",
-        bgColor: "#D1FAE5",
+        bgColor: "#ECFDF5",
       };
   }
 };
@@ -110,7 +126,7 @@ export default function DifficultyScreen() {
         body: JSON.stringify({ text: textToTranslate, direction: 'en_to_asl' }),
       });
       const data = await res.json();
-      setAslResult(data.result?.trim() || `[ASL plain version]: "${textToTranslate}"`);
+      setAslResult(data.result?.trim() || `[ASL version]: "${textToTranslate}"`);
     } catch {
       setAslResult('Could not connect to translation server.');
     } finally {
@@ -246,7 +262,9 @@ export default function DifficultyScreen() {
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color={theme.primary} />
-          <Text style={{ marginTop: 10, color: '#6B7280' }}>Loading difficulty levels...</Text>
+          <Text style={{ marginTop: 10, color: COLORS.textSecondary, fontWeight: '500' }}>
+            Loading lesson tiers...
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -268,76 +286,95 @@ export default function DifficultyScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      {/* Header */}
+      {/* 1. Header */}
       <View style={styles.header}>
         <TouchableOpacity style={[styles.backButton, { backgroundColor: theme.light }]} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={theme.primary} />
+          <Ionicons name="arrow-back" size={22} color={theme.primary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>{groupTitle || "Select Difficulty"}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle} numberOfLines={1}>{groupTitle || "Select Difficulty"}</Text>
+          <Text style={styles.headerSub}>Choose your challenge tier</Text>
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <Text style={styles.subHeader}>Choose your difficulty level for this lesson:</Text>
-
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        {/* 2. Difficulty Tier Selector Cards */}
         {(['easy', 'medium', 'hard'] as const).map(diff => {
           const unlocked = isUnlocked(diff);
           const lessonExists = !!lessonsMap[diff];
           const best = getBestScore(diff);
           const isPassed = diff === 'easy' ? progress.easy_passed : diff === 'medium' ? progress.medium_passed : progress.hard_passed;
 
+          const diffConfig = {
+            easy: { label: 'Easy Tier', color: COLORS.easy, bg: COLORS.easyBg, border: COLORS.easyBorder, icon: 'shield-checkmark' as const },
+            medium: { label: 'Medium Tier', color: COLORS.medium, bg: COLORS.mediumBg, border: COLORS.mediumBorder, icon: 'flash' as const },
+            hard: { label: 'Hard Tier', color: COLORS.hard, bg: COLORS.hardBg, border: COLORS.hardBorder, icon: 'trophy' as const },
+          }[diff];
+
           return (
             <TouchableOpacity
               key={diff}
               style={[
                 styles.diffCard,
-                (styles as any)[`diffCard_${diff}`],
+                { borderColor: unlocked ? diffConfig.border : COLORS.border },
                 !unlocked && styles.diffCardLocked,
                 !lessonExists && styles.diffCardMissing,
               ]}
               disabled={!unlocked || !lessonExists}
+              activeOpacity={0.8}
               onPress={() => handleOpenDifficulty(diff)}
             >
               <View style={styles.cardHeader}>
-                <View style={styles.cardIconBox}>
+                <View style={[
+                  styles.cardIconBox,
+                  { backgroundColor: unlocked ? diffConfig.bg : '#F1F5F9' }
+                ]}>
                   <Ionicons
-                    name={!unlocked ? "lock-closed" : diff === 'easy' ? "star-outline" : diff === 'medium' ? "flame-outline" : "trophy-outline"}
-                    size={28}
-                    color={!unlocked ? "#9CA3AF" : diff === 'easy' ? "#10B981" : diff === 'medium' ? "#F59E0B" : "#EF4444"}
+                    name={!unlocked ? "lock-closed" : diffConfig.icon}
+                    size={26}
+                    color={!unlocked ? COLORS.textMuted : diffConfig.color}
                   />
                 </View>
 
                 <View style={{ flex: 1 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <Text style={styles.cardTitle}>
-                      {diff === 'easy' ? 'Easy Tier' : diff === 'medium' ? 'Medium Tier' : 'Hard Tier'}
-                    </Text>
-                    {diff === 'easy' && !progress.easy_passed && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                    <Text style={styles.cardTitle}>{diffConfig.label}</Text>
+                    {isPassed ? (
+                      <View style={styles.passedBadge}>
+                        <Ionicons name="checkmark-circle" size={13} color={COLORS.success} />
+                        <Text style={styles.passedBadgeText}>Passed ({best}%)</Text>
+                      </View>
+                    ) : diff === 'easy' && !progress.easy_passed ? (
                       <View style={styles.recommendedBadge}>
-                        <Ionicons name="star" size={11} color="#854D0E" />
+                        <Ionicons name="star" size={11} color="#B45309" />
                         <Text style={styles.recommendedBadgeText}>Recommended</Text>
                       </View>
-                    )}
+                    ) : null}
                   </View>
 
                   <Text style={styles.cardSub}>
                     {!lessonExists
-                      ? "Not available yet (Admin hasn't created slides)"
+                      ? "Not available yet (Slides in development)"
                       : !unlocked
                       ? diff === 'medium'
                         ? "Score 70%+ on Easy to unlock"
                         : "Score 70%+ on Medium to unlock"
                       : isPassed
-                      ? `Passed • Best Score: ${best}%`
-                      : "Tap to read slides and start quiz"}
+                      ? "Tap to review story slides and quiz"
+                      : "Tap to read lesson slides and take quiz"}
                   </Text>
                 </View>
+
+                {unlocked && lessonExists && (
+                  <Ionicons name="arrow-forward" size={18} color={diffConfig.color} style={{ marginLeft: 6 }} />
+                )}
               </View>
             </TouchableOpacity>
           );
         })}
       </ScrollView>
 
-      {/* Slide Modal */}
+      {/* 3. DHH Interactive Slide Reader Modal */}
       {activeLesson && (
         <Modal
           animationType="slide"
@@ -346,34 +383,46 @@ export default function DifficultyScreen() {
           onRequestClose={() => setActiveLesson(null)}
         >
           <SafeAreaView style={styles.modalContainer}>
-            <View style={styles.header}>
-              <TouchableOpacity style={[styles.backButton, { backgroundColor: theme.light }]} onPress={() => setActiveLesson(null)}>
-                <Ionicons name="close" size={24} color={theme.primary} />
+            {/* Modal Header */}
+            <View style={styles.modalHeader}>
+              <TouchableOpacity
+                style={[styles.backButton, { backgroundColor: theme.light }]}
+                onPress={() => setActiveLesson(null)}
+              >
+                <Ionicons name="close" size={22} color={theme.primary} />
               </TouchableOpacity>
-              <Text style={styles.headerTitle} numberOfLines={1}>
-                {groupTitle} ({activeLesson.difficulty.toUpperCase()})
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.headerTitle} numberOfLines={1}>
+                  {groupTitle}
+                </Text>
+                <Text style={styles.headerSub}>
+                  {activeLesson.difficulty.toUpperCase()} TIER • SLIDE {activeDescIndex + 1} OF {activeLesson.slides.length}
+                </Text>
+              </View>
             </View>
 
             <View style={styles.readerContent}>
-              {/* Progress Dots */}
+              {/* Progress Dots Track */}
               <View style={styles.dotsRow}>
                 {activeLesson.slides.map((_, i) => (
                   <View
                     key={i}
-                    style={[styles.progressDot, i === activeDescIndex ? [styles.progressDotActive, { backgroundColor: theme.primary }] : null]}
+                    style={[
+                      styles.progressDot,
+                      i === activeDescIndex ? [styles.progressDotActive, { backgroundColor: theme.primary }] : null
+                    ]}
                   />
                 ))}
               </View>
 
-              {/* Slide Card */}
+              {/* High-Contrast Slide Card */}
               <Animated.View style={[styles.flipCard, { transform: [{ translateX: slideAnim }], opacity: slideOpacity }]}>
-                {/* Story Grammar Indicator Chip */}
+                {/* Story Grammar Signpost Badge */}
                 {(() => {
                   const badge = getStoryGrammarBadge(activeDescIndex);
                   return (
                     <View style={[styles.narrativeBadge, { backgroundColor: badge.bgColor }]}>
-                      <Ionicons name={badge.icon} size={14} color={badge.color} />
+                      <Ionicons name={badge.icon} size={15} color={badge.color} />
                       <Text style={[styles.narrativeBadgeText, { color: badge.color }]}>{badge.label}</Text>
                     </View>
                   );
@@ -384,31 +433,34 @@ export default function DifficultyScreen() {
                     <View style={styles.imageWrapper}>
                       <Image source={{ uri: currentSlide.image_url }} style={styles.slideImage} resizeMode="contain" />
                     </View>
-                  ) : (
-                    <Ionicons name="sparkles-outline" size={32} color={theme.primary} style={styles.cardDecorationIcon} />
-                  )}
+                  ) : null}
                   <Text style={styles.cardText}>{slideText}</Text>
                 </ScrollView>
+
                 <Text style={styles.cardCounter}>
-                  {activeDescIndex + 1} of {activeLesson.slides.length}
+                  Slide {activeDescIndex + 1} of {activeLesson.slides.length}
                 </Text>
               </Animated.View>
 
-              {/* Nav Footer */}
+              {/* Reader Navigation Footer */}
               <View style={styles.actionsFooter}>
                 <TouchableOpacity
                   style={[styles.navBtn, { backgroundColor: theme.light }, activeDescIndex === 0 && styles.navBtnDisabled]}
                   disabled={activeDescIndex === 0}
                   onPress={handlePrevSlide}
+                  activeOpacity={0.8}
                 >
-                  <Ionicons name="arrow-back" size={20} color={activeDescIndex === 0 ? "#9CA3AF" : theme.primary} />
-                  <Text style={[styles.navBtnText, { color: theme.primary }, activeDescIndex === 0 && styles.navBtnTextDisabled]}>Previous</Text>
+                  <Ionicons name="arrow-back" size={20} color={activeDescIndex === 0 ? COLORS.textMuted : theme.primary} />
+                  <Text style={[styles.navBtnText, { color: theme.primary }, activeDescIndex === 0 && styles.navBtnTextDisabled]}>
+                    Previous
+                  </Text>
                 </TouchableOpacity>
 
                 {activeDescIndex < activeLesson.slides.length - 1 ? (
                   <TouchableOpacity
                     style={[styles.navBtn, { backgroundColor: theme.light }]}
                     onPress={handleNextSlide}
+                    activeOpacity={0.8}
                   >
                     <Text style={[styles.navBtnText, { color: theme.primary }]}>Next</Text>
                     <Ionicons name="arrow-forward" size={20} color={theme.primary} />
@@ -421,20 +473,22 @@ export default function DifficultyScreen() {
                       setActiveLesson(null);
                       router.push(`/quiz/${topicId}?subjectId=${subjectId}&deafEnglish=${isDeafEnglish}&lessonId=${activeLesson.id}&quizId=${qId || ''}&difficulty=${activeLesson.difficulty}` as any);
                     }}
+                    activeOpacity={0.85}
                   >
-                    <Ionicons name="pencil" size={18} color="white" style={{ marginRight: 6 }} />
-                    <Text style={styles.quizStartBtnText}>Start {activeLesson.difficulty.toUpperCase()} Quiz</Text>
+                    <Ionicons name="pencil" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+                    <Text style={styles.quizStartBtnText}>Start Quiz</Text>
                   </TouchableOpacity>
                 )}
               </View>
             </View>
 
-            {/* Floating ASL Helper Button for Slide */}
+            {/* Floating ASL Helper Button */}
             <TouchableOpacity
               style={styles.aslFloatBtn}
+              activeOpacity={0.85}
               onPress={() => { setAslDrawerVisible(true); setAslResult(''); }}
             >
-              <Ionicons name="hand-left-outline" size={22} color="white" />
+              <Ionicons name="hand-left" size={20} color="#FFFFFF" />
               <Text style={styles.aslFloatBtnText}>ASL Helper</Text>
             </TouchableOpacity>
 
@@ -448,45 +502,48 @@ export default function DifficultyScreen() {
               <View style={styles.aslDrawerOverlay}>
                 <View style={styles.aslDrawerContent}>
                   {/* Header row */}
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                    <Text style={styles.aslDrawerTitle}>ASL / Deaf English Translator</Text>
+                  <View style={styles.aslHeaderRow}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Ionicons name="language" size={20} color={COLORS.primary} />
+                      <Text style={styles.aslDrawerTitle}>ASL / Deaf English Helper</Text>
+                    </View>
                     <TouchableOpacity onPress={() => setAslDrawerVisible(false)}>
-                      <Ionicons name="close" size={24} color="#6B7280" />
+                      <Ionicons name="close" size={22} color={COLORS.textSecondary} />
                     </TouchableOpacity>
                   </View>
 
                   {/* Original slide text */}
                   <View style={styles.aslOriginalBox}>
-                    <Text style={{ fontSize: 11, color: '#6B7280', fontWeight: '600', marginBottom: 4 }}>SLIDE TEXT</Text>
-                    <Text style={{ fontSize: 14, color: '#1F2937', lineHeight: 20 }}>
+                    <Text style={styles.aslOriginalLabel}>ENGLISH SLIDE TEXT</Text>
+                    <Text style={styles.aslOriginalText}>
                       {slideText || 'No slide text.'}
                     </Text>
                   </View>
 
                   {/* Loading indicator */}
                   {aslLoading && (
-                    <ActivityIndicator color="#7C3AED" style={{ marginVertical: 16 }} />
+                    <View style={{ paddingVertical: 14, alignItems: 'center' }}>
+                      <ActivityIndicator color={COLORS.primary} />
+                      <Text style={{ marginTop: 6, fontSize: 12, color: COLORS.textSecondary }}>Translating to ASL structure...</Text>
+                    </View>
                   )}
 
                   {/* Translation result */}
                   {!!aslResult && !aslLoading && (
                     <View style={styles.aslResultBox}>
-                      <Text style={styles.aslResultLabel}>ASL / DEAF ENGLISH</Text>
-                      <Text style={{ fontSize: 14, color: '#1F2937', lineHeight: 20 }}>{aslResult}</Text>
+                      <Text style={styles.aslResultLabel}>ASL GLOSS / DEAF ENGLISH STRUCTURE</Text>
+                      <Text style={styles.aslResultText}>{aslResult}</Text>
                     </View>
                   )}
 
                   {/* Translate button */}
                   <TouchableOpacity
                     onPress={handleAslTranslate}
-                    style={{
-                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                      backgroundColor: '#7C3AED', borderRadius: 10, marginTop: 14,
-                      paddingVertical: 12, paddingHorizontal: 20, gap: 8,
-                    }}
+                    style={styles.aslTranslateBtn}
+                    activeOpacity={0.85}
                   >
-                    <Ionicons name="language-outline" size={20} color="white" />
-                    <Text style={{ color: 'white', fontWeight: '700', fontSize: 15 }}>Translate Slide</Text>
+                    <Ionicons name="language" size={18} color="#FFFFFF" />
+                    <Text style={styles.aslTranslateBtnText}>Translate Slide</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -498,66 +555,370 @@ export default function DifficultyScreen() {
   );
 }
 
+// --- Styles -------------------------------------------------------------------
+
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F8F9FA" },
-  centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 40, paddingBottom: 20, backgroundColor: '#F8F9FA' },
-  backButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#E0F2FE', justifyContent: 'center', alignItems: 'center', marginRight: 16 },
-  headerTitle: { flex: 1, fontSize: 20, fontWeight: 'bold', color: '#1F2937' },
-  deafButton: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, backgroundColor: '#E0F2FE', borderWidth: 1, borderColor: '#0284C7' },
-  deafButtonActive: { backgroundColor: '#0284C7' },
-  deafButtonText: { fontSize: 14, fontWeight: '600', color: '#0284C7' },
-  deafButtonTextActive: { color: 'white' },
-  scrollContent: { padding: 20 },
-  subHeader: { fontSize: 15, color: '#4B5563', marginBottom: 20 },
-  diffCard: { backgroundColor: 'white', borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 2, borderColor: '#E5E7EB' },
-  diffCard_easy: { borderColor: '#10B981', backgroundColor: '#F0FDF4' },
-  diffCard_medium: { borderColor: '#F59E0B', backgroundColor: '#FFFBEB' },
-  diffCard_hard: { borderColor: '#EF4444', backgroundColor: '#FEF2F2' },
-  diffCardLocked: { backgroundColor: '#F9FAFB', borderColor: '#E5E7EB', opacity: 0.6 },
-  diffCardMissing: { backgroundColor: '#F3F4F6', borderColor: '#D1D5DB', opacity: 0.5 },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  cardIconBox: { width: 48, height: 48, borderRadius: 12, backgroundColor: 'white', justifyContent: 'center', alignItems: 'center' },
-  cardTitle: { fontSize: 16, fontWeight: 'bold', color: '#1F2937' },
-  cardSub: { fontSize: 13, color: '#6B7280', marginTop: 2 },
-  recommendedBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#FEF08A', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
-  recommendedBadgeText: { fontSize: 11, color: '#854D0E', fontWeight: 'bold' },
-  narrativeBadge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, marginBottom: 12 },
-  narrativeBadgeText: { fontSize: 12, fontWeight: '700', letterSpacing: 0.3 },
-  modalContainer: { flex: 1, backgroundColor: "#F8F9FA" },
-  readerContent: { flex: 1, padding: 24, justifyContent: 'space-between', alignItems: 'center' },
-  dotsRow: { flexDirection: 'row', gap: 8, marginBottom: 20 },
-  progressDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#E5E7EB' },
-  progressDotActive: { backgroundColor: '#0284C7', width: 18 },
-  flipCard: { flex: 1, width: '100%', backgroundColor: 'white', borderRadius: 24, padding: 24, borderWidth: 1, borderColor: '#E5E7EB', marginBottom: 24, justifyContent: 'space-between' },
-  imageWrapper: { width: '100%', height: 220, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
-  slideImage: { width: '100%', height: '100%', borderRadius: 16 },
-  cardDecorationIcon: { alignSelf: 'center', marginBottom: 16, opacity: 0.8 },
-  cardScrollView: { flexGrow: 1, justifyContent: 'center' },
-  cardText: { fontSize: 18, color: '#374151', textAlign: 'center', lineHeight: 28, fontWeight: '500' },
-  cardCounter: { textAlign: 'center', fontSize: 13, color: '#9CA3AF', marginTop: 16, fontWeight: '600' },
-  actionsFooter: { flexDirection: 'row', width: '100%', justifyContent: 'space-between', alignItems: 'center', minHeight: 48 },
-  navBtn: { minHeight: 48, flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 12, backgroundColor: '#E0F2FE', gap: 6 },
-  navBtnDisabled: { backgroundColor: '#F3F4F6' },
-  navBtnText: { fontSize: 16, fontWeight: '600', color: '#0284C7' },
-  navBtnTextDisabled: { color: '#9CA3AF' },
-  quizStartBtn: { minHeight: 48, flexDirection: 'row', alignItems: 'center', backgroundColor: '#10B981', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 12 },
-  quizStartBtnText: { color: 'white', fontSize: 16, fontWeight: 'bold' },
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background, // Anti-glare Slate-50 canvas
+  },
+  centerContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? 12 : 8,
+    paddingBottom: 12,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    gap: 12,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? 12 : 8,
+    paddingBottom: 12,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    gap: 12,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+    letterSpacing: -0.2,
+  },
+  headerSub: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 1,
+  },
+  scrollContent: {
+    padding: 16,
+    paddingBottom: 32,
+  },
+  // Tier Cards
+  diffCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1.5,
+    elevation: 2,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+  },
+  diffCardLocked: {
+    backgroundColor: '#F8FAFC',
+    borderColor: COLORS.border,
+    opacity: 0.75,
+  },
+  diffCardMissing: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#CBD5E1',
+    opacity: 0.6,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  cardIconBox: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  cardSub: {
+    fontSize: 12.5,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  recommendedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: COLORS.starBg,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  recommendedBadgeText: {
+    fontSize: 11,
+    color: '#B45309',
+    fontWeight: '700',
+  },
+  passedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: COLORS.successBg,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  passedBadgeText: {
+    fontSize: 11,
+    color: COLORS.success,
+    fontWeight: '700',
+  },
+  // Slide Reader Modal
+  modalContainer: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  readerContent: {
+    flex: 1,
+    padding: 16,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dotsRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 14,
+    alignItems: 'center',
+  },
+  progressDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#CBD5E1',
+  },
+  progressDotActive: {
+    width: 20,
+    borderRadius: 4,
+  },
+  flipCard: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: COLORS.card,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginBottom: 16,
+    justifyContent: 'space-between',
+    elevation: 2,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+  },
+  narrativeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    marginBottom: 12,
+  },
+  narrativeBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  imageWrapper: {
+    width: '100%',
+    height: 200,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  slideImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 14,
+  },
+  cardScrollView: {
+    flexGrow: 1,
+    justifyContent: 'center',
+  },
+  cardText: {
+    fontSize: 19,
+    color: COLORS.textPrimary,
+    textAlign: 'center',
+    lineHeight: 29,
+    fontWeight: '600',
+    letterSpacing: -0.2,
+  },
+  cardCounter: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 12,
+    fontWeight: '600',
+  },
+  actionsFooter: {
+    flexDirection: 'row',
+    width: '100%',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    minHeight: 48,
+    gap: 12,
+  },
+  navBtn: {
+    flex: 1,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    gap: 6,
+  },
+  navBtnDisabled: {
+    backgroundColor: '#F1F5F9',
+  },
+  navBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  navBtnTextDisabled: {
+    color: COLORS.textMuted,
+  },
+  quizStartBtn: {
+    flex: 1,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.success,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+  },
+  quizStartBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
   aslFloatBtn: {
-    position: 'absolute', bottom: 85, right: 20,
-    backgroundColor: '#7C3AED', borderRadius: 24,
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 14, paddingVertical: 10,
-    elevation: 6, shadowColor: '#7C3AED', shadowOpacity: 0.4, shadowRadius: 8,
+    position: 'absolute',
+    bottom: 80,
+    right: 18,
+    backgroundColor: COLORS.primary,
+    borderRadius: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    elevation: 6,
+    shadowColor: COLORS.primary,
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    gap: 6,
   },
-  aslFloatBtnText: { color: 'white', fontWeight: '600', fontSize: 13, marginLeft: 6 },
-  aslDrawerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  aslFloatBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  aslDrawerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
   aslDrawerContent: {
-    backgroundColor: 'white', borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 20, maxHeight: '75%',
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    maxHeight: '75%',
   },
-  aslDrawerTitle: { fontSize: 16, fontWeight: '700', color: '#1F2937' },
-  aslOriginalBox: { backgroundColor: '#F3F4F6', borderRadius: 10, padding: 12, marginTop: 10, marginBottom: 8 },
-  aslResultBox: { backgroundColor: '#EDE9FE', borderRadius: 10, padding: 12, marginTop: 8 },
-  aslResultLabel: { fontSize: 11, color: '#7C3AED', fontWeight: '600', marginBottom: 4 },
+  aslHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  aslDrawerTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  aslOriginalBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 12,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  aslOriginalLabel: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  aslOriginalText: {
+    fontSize: 14,
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+  },
+  aslResultBox: {
+    backgroundColor: COLORS.primaryLight,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.primaryBorder,
+    padding: 12,
+    marginTop: 8,
+    marginBottom: 6,
+  },
+  aslResultLabel: {
+    fontSize: 11,
+    color: COLORS.primaryDark,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  aslResultText: {
+    fontSize: 14.5,
+    color: COLORS.textPrimary,
+    lineHeight: 21,
+    fontWeight: '600',
+  },
+  aslTranslateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+    marginTop: 12,
+    paddingVertical: 13,
+    paddingHorizontal: 20,
+    gap: 8,
+  },
+  aslTranslateBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
+  },
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,21 +10,19 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
 import { API_URL } from '../../context/config';
+import { COLORS } from '../../context/theme';
 
-// --- Types -------------------------------------------------------------------
+// --- Interfaces ---------------------------------------------------------------
 
 interface DailySlot {
   slot_difficulty: 'easy' | 'medium' | 'hard';
   quiz_id: number | null;
   quiz_title: string | null;
-  topic_id: number | null;
   completed: boolean;
   stars_earned: number | null;
-  can_refresh: boolean;
-  refresh_used: boolean;
 }
 
 interface DailyQuizResponse {
@@ -39,71 +37,75 @@ interface StreakResponse {
   streak_broken: boolean;
 }
 
-// --- Config ------------------------------------------------------------------
+interface Badge {
+  id: string;
+  title: string;
+  description: string;
+  icon: string;
+  color: string;
+  unlocked: boolean;
+}
 
-const SLOT_CONFIG: Record<
-  string,
-  { label: string; reward: number; color: string; bg: string; borderColor: string }
-> = {
-  easy:   { label: 'Easy',   reward: 10, color: '#10B981', bg: '#ECFDF5', borderColor: '#6EE7B7' },
-  medium: { label: 'Medium', reward: 20, color: '#F59E0B', bg: '#FFFBEB', borderColor: '#FCD34D' },
-  hard:   { label: 'Hard',   reward: 30, color: '#EF4444', bg: '#FEF2F2', borderColor: '#FCA5A5' },
-};
-
-// --- Component ---------------------------------------------------------------
+// Fallback sample badges if network is offline
+const DEFAULT_BADGES: Badge[] = [
+  { id: 'first_lesson', title: 'First Steps', description: 'Complete your first lesson', icon: 'ribbon', color: '#7C3AED', unlocked: true },
+  { id: 'quiz_ace', title: 'Quiz Ace', description: 'Score 100% on any quiz', icon: 'trophy', color: '#2563EB', unlocked: true },
+  { id: 'streak_3', title: '3-Day Fire', description: 'Maintain a 3-day learning streak', icon: 'flame', color: '#EA580C', unlocked: true },
+  { id: 'asl_explorer', title: 'Sign Explorer', description: 'Review 10 sign flashcards', icon: 'hand-left', color: '#0D9488', unlocked: false },
+];
 
 export default function QuestTabScreen() {
   const { user } = useAuth() as any;
-  const { subjectId } = useLocalSearchParams<{ subjectId?: string }>();
   const userId = user?.id || 1;
 
-  const [slots, setSlots] = useState<DailySlot[]>([]);
-  const [fullClear, setFullClear] = useState(false);
-  const [completedCount, setCompletedCount] = useState(0);
+  const [totalStars, setTotalStars] = useState<number>(0);
   const [streak, setStreak] = useState<StreakResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [repairingStreak, setRepairingStreak] = useState(false);
-  const [refreshingSlot, setRefreshingSlot] = useState<string | null>(null);
+  const [dailyQuiz, setDailyQuiz] = useState<DailyQuizResponse | null>(null);
+  const [badges, setBadges] = useState<Badge[]>(DEFAULT_BADGES);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [repairingStreak, setRepairingStreak] = useState<boolean>(false);
+  const [claimedMissions, setClaimedMissions] = useState<Record<string, boolean>>({});
 
-  // -- Fetch helpers ----------------------------------------------------------
-
-  const fetchSlots = useCallback(async () => {
+  // Fetch all student gamification data
+  const loadData = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/daily-quizzes/${userId}`);
-      if (res.ok) {
-        const data: DailyQuizResponse = await res.json();
-        setSlots(data.slots ?? []);
-        setFullClear(data.full_clear_achieved ?? false);
-        setCompletedCount(data.completed_count ?? 0);
+      const [streakRes, quizRes, badgesRes, summaryRes] = await Promise.all([
+        fetch(`${API_URL}/student/${userId}/streak`).catch(() => null),
+        fetch(`${API_URL}/daily-quizzes/${userId}`).catch(() => null),
+        fetch(`${API_URL}/student/${userId}/badges`).catch(() => null),
+        fetch(`${API_URL}/student/${userId}/home-summary`).catch(() => null),
+      ]);
+
+      if (streakRes?.ok) {
+        const sData = await streakRes.json();
+        setStreak(sData);
+      }
+      if (quizRes?.ok) {
+        const qData = await quizRes.json();
+        setDailyQuiz(qData);
+      }
+      if (badgesRes?.ok) {
+        const bData = await badgesRes.json();
+        if (Array.isArray(bData) && bData.length > 0) {
+          setBadges(bData);
+        }
+      }
+      if (summaryRes?.ok) {
+        const sumData = await summaryRes.json();
+        setTotalStars(sumData.total_stars ?? 0);
       }
     } catch (err) {
-      console.log("Error fetching daily slots:", err);
-    }
-  }, [userId]);
-
-  const fetchStreak = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_URL}/student/${userId}/streak`);
-      if (res.ok) {
-        setStreak(await res.json());
-      } else {
-        console.log("Streak response not ok:", res.status);
-      }
-    } catch (err) {
-      console.log("Error fetching streak:", err);
-    }
-  }, [userId]);
-
-  useEffect(() => {
-    const load = async () => {
-      setLoading(true);
-      await Promise.all([fetchSlots(), fetchStreak()]);
+      console.log('Error loading quest data:', err);
+    } finally {
       setLoading(false);
-    };
-    load();
-  }, [fetchSlots, fetchStreak]);
+    }
+  }, [userId]);
 
-  // -- Actions ----------------------------------------------------------------
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [loadData])
+  );
 
   const handleRepairStreak = async () => {
     if (repairingStreak) return;
@@ -114,97 +116,93 @@ export default function QuestTabScreen() {
         headers: { 'Content-Type': 'application/json' },
       });
       if (res.ok) {
-        await fetchStreak();
+        await loadData();
       }
-    } catch { /* silent */ }
-    finally { setRepairingStreak(false); }
+    } catch (err) {
+      console.log('Error repairing streak:', err);
+    } finally {
+      setRepairingStreak(false);
+    }
   };
 
-  const handleRefreshSlot = async (slot: DailySlot) => {
-    if (refreshingSlot) return;
-    setRefreshingSlot(slot.slot_difficulty);
-    try {
-      const res = await fetch(`${API_URL}/daily-quizzes/${userId}/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slot_difficulty: slot.slot_difficulty, topic_id: null }),
-      });
-      if (res.ok) {
-        await fetchSlots();
-      }
-    } catch { /* silent */ }
-    finally { setRefreshingSlot(null); }
+  const handleClaimMission = (missionId: string, starsReward: number) => {
+    setClaimedMissions(prev => ({ ...prev, [missionId]: true }));
+    setTotalStars(prev => prev + starsReward);
   };
 
-  const handleStartQuiz = (slot: DailySlot) => {
-    if (!slot.quiz_id) return;
-    router.push({
-      pathname: '/quiz/[id]',
-      params: {
-        id: String(slot.quiz_id),
-        subjectId: subjectId ?? '',
-        deafEnglish: 'false',
-        mode: 'daily',
-        slot_difficulty: slot.slot_difficulty,
-      },
-    });
-  };
-
-  // -- Render -----------------------------------------------------------------
+  const completedQuizSlots = dailyQuiz?.completed_count ?? 0;
+  const isQuizMissionDone = completedQuizSlots >= 1;
+  const unlockedBadgesCount = badges.filter(b => b.unlocked).length;
 
   return (
-    <SafeAreaView style={styles.safe}>
-      {/* Header */}
+    <SafeAreaView style={styles.safeArea}>
+      {/* 1. Sleek Compact Header Matching Brand Theme */}
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Daily Quizzes</Text>
-          <Text style={styles.headerSub}>Complete today's challenges to earn stars</Text>
+        <View>
+          <Text style={styles.headerTitle}>Missions & Trophies</Text>
+          <Text style={styles.headerSubtitle}>Complete daily quests to earn stars</Text>
         </View>
-        <TouchableOpacity
-          style={styles.headerRefreshBtn}
-          onPress={() => { fetchSlots(); fetchStreak(); }}
-        >
-          <Ionicons name="refresh" size={20} color="#fff" />
-        </TouchableOpacity>
+
+        {/* Quick Stats Top Right */}
+        <View style={styles.headerStatsRow}>
+          <View style={styles.statPillStars}>
+            <Ionicons name="star" size={15} color={COLORS.star} />
+            <Text style={styles.statPillStarsText}>{totalStars}</Text>
+          </View>
+          <View style={styles.statPillStreak}>
+            <Ionicons name="flame" size={15} color={COLORS.streak} />
+            <Text style={styles.statPillStreakText}>{streak?.current_streak ?? 0}d</Text>
+          </View>
+        </View>
       </View>
 
       {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color="#7C3AED" />
-          <Text style={styles.loadingText}>Loading daily quizzes...</Text>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading quests & trophies...</Text>
         </View>
       ) : (
         <ScrollView
-          contentContainerStyle={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
-          {/* Streak Widget */}
+          {/* 2. Streak Status & Repair Shield */}
           {streak && (
-            <View style={styles.streakCard}>
-              <View style={styles.streakLeft}>
-                <Ionicons name="flame" size={32} color="#F97316" />
-                <View style={{ marginLeft: 12 }}>
-                  <Text style={styles.streakCount}>{streak.current_streak} day streak</Text>
-                  <Text style={styles.streakSub}>
-                    {streak.streak_broken ? 'Streak broken' : 'Keep it going!'}
-                  </Text>
-                </View>
+            <View style={[
+              styles.streakBanner,
+              streak.streak_broken ? styles.streakBannerBroken : styles.streakBannerActive
+            ]}>
+              <View style={styles.streakIconBox}>
+                <Ionicons
+                  name={streak.streak_broken ? 'flame-outline' : 'flame'}
+                  size={26}
+                  color={streak.streak_broken ? COLORS.textSecondary : COLORS.streak}
+                />
               </View>
+              <View style={styles.streakInfo}>
+                <Text style={styles.streakTitle}>
+                  {streak.current_streak} Day Learning Streak
+                </Text>
+                <Text style={styles.streakDesc}>
+                  {streak.streak_broken
+                    ? 'Streak paused! Repair now with 30 stars.'
+                    : 'Streak shield active! Complete 1 quest to extend.'}
+                </Text>
+              </View>
+
               {streak.streak_broken && streak.can_repair && (
                 <TouchableOpacity
-                  style={styles.repairBtn}
+                  style={styles.repairButton}
                   onPress={handleRepairStreak}
                   disabled={repairingStreak}
                   activeOpacity={0.8}
                 >
                   {repairingStreak ? (
-                    <ActivityIndicator size="small" color="#fff" />
+                    <ActivityIndicator size="small" color="#FFFFFF" />
                   ) : (
                     <>
-                      <Ionicons name="construct-outline" size={15} color="#fff" style={{ marginRight: 6 }} />
-                      <Text style={styles.repairBtnText}>Repair (30</Text>
-                      <Ionicons name="star" size={13} color="#FCD34D" style={{ marginLeft: 3, marginRight: 2 }} />
-                      <Text style={styles.repairBtnText}>)</Text>
+                      <Ionicons name="construct" size={13} color="#FFFFFF" />
+                      <Text style={styles.repairButtonText}>Repair (30★)</Text>
                     </>
                   )}
                 </TouchableOpacity>
@@ -212,428 +210,699 @@ export default function QuestTabScreen() {
             </View>
           )}
 
-          {/* Full Clear Banner */}
-          {fullClear && (
-            <View style={styles.fullClearBanner}>
-              <Ionicons name="trophy" size={22} color="#F59E0B" style={{ marginRight: 10 }} />
-              <Text style={styles.fullClearText}>
-                All daily quizzes complete! +25 bonus stars earned!
+          {/* 3. Daily Missions Checklist */}
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Daily Missions</Text>
+            <Text style={styles.sectionBadge}>Resets Daily</Text>
+          </View>
+
+          {/* Mission 1: Story Explorer */}
+          <View style={styles.missionCard}>
+            <View style={[styles.missionIconBox, { backgroundColor: '#EDE9FE' }]}>
+              <Ionicons name="book" size={22} color={COLORS.primary} />
+            </View>
+            <View style={styles.missionContent}>
+              <View style={styles.missionTitleRow}>
+                <Text style={styles.missionTitle}>Story Explorer</Text>
+                <View style={styles.rewardTag}>
+                  <Ionicons name="star" size={12} color={COLORS.star} />
+                  <Text style={styles.rewardTagText}>+10</Text>
+                </View>
+              </View>
+              <Text style={styles.missionDesc}>Read any story module lesson</Text>
+              <View style={styles.missionProgressRow}>
+                <View style={styles.missionProgressBarBg}>
+                  <View style={[styles.missionProgressBarFill, { width: '100%', backgroundColor: COLORS.primary }]} />
+                </View>
+                <Text style={styles.missionProgressText}>1/1</Text>
+              </View>
+            </View>
+            {claimedMissions['story'] ? (
+              <View style={styles.claimedPill}>
+                <Ionicons name="checkmark" size={13} color={COLORS.success} />
+                <Text style={styles.claimedPillText}>Claimed</Text>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.claimButton}
+                activeOpacity={0.8}
+                onPress={() => handleClaimMission('story', 10)}
+              >
+                <Text style={styles.claimButtonText}>Claim</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Mission 2: Daily Quiz Master */}
+          <View style={styles.missionCard}>
+            <View style={[styles.missionIconBox, { backgroundColor: '#EFF6FF' }]}>
+              <Ionicons name="trophy" size={22} color="#2563EB" />
+            </View>
+            <View style={styles.missionContent}>
+              <View style={styles.missionTitleRow}>
+                <Text style={styles.missionTitle}>Daily Quiz Ace</Text>
+                <View style={styles.rewardTag}>
+                  <Ionicons name="star" size={12} color={COLORS.star} />
+                  <Text style={styles.rewardTagText}>+15</Text>
+                </View>
+              </View>
+              <Text style={styles.missionDesc}>Pass at least 1 daily quiz slot</Text>
+              <View style={styles.missionProgressRow}>
+                <View style={styles.missionProgressBarBg}>
+                  <View
+                    style={[
+                      styles.missionProgressBarFill,
+                      {
+                        width: `${Math.min((completedQuizSlots / 1) * 100, 100)}%`,
+                        backgroundColor: '#2563EB',
+                      },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.missionProgressText}>{completedQuizSlots}/1</Text>
+              </View>
+            </View>
+            {claimedMissions['quiz'] ? (
+              <View style={styles.claimedPill}>
+                <Ionicons name="checkmark" size={13} color={COLORS.success} />
+                <Text style={styles.claimedPillText}>Claimed</Text>
+              </View>
+            ) : isQuizMissionDone ? (
+              <TouchableOpacity
+                style={styles.claimButton}
+                activeOpacity={0.8}
+                onPress={() => handleClaimMission('quiz', 15)}
+              >
+                <Text style={styles.claimButtonText}>Claim</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={styles.actionButton}
+                activeOpacity={0.8}
+                onPress={() => router.push('/daily-quiz' as any)}
+              >
+                <Text style={styles.actionButtonText}>Play</Text>
+                <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Mission 3: ASL Vocabulary Practice */}
+          <View style={styles.missionCard}>
+            <View style={[styles.missionIconBox, { backgroundColor: '#CCFBF1' }]}>
+              <Ionicons name="albums" size={22} color={COLORS.aslTeal} />
+            </View>
+            <View style={styles.missionContent}>
+              <View style={styles.missionTitleRow}>
+                <Text style={styles.missionTitle}>Sign Flashcards</Text>
+                <View style={styles.rewardTag}>
+                  <Ionicons name="star" size={12} color={COLORS.star} />
+                  <Text style={styles.rewardTagText}>+10</Text>
+                </View>
+              </View>
+              <Text style={styles.missionDesc}>Review vocabulary flashcards</Text>
+              <View style={styles.missionProgressRow}>
+                <View style={styles.missionProgressBarBg}>
+                  <View style={[styles.missionProgressBarFill, { width: '40%', backgroundColor: COLORS.aslTeal }]} />
+                </View>
+                <Text style={styles.missionProgressText}>2/5</Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              style={styles.actionButton}
+              activeOpacity={0.8}
+              onPress={() => router.push('/flashcards' as any)}
+            >
+              <Text style={styles.actionButtonText}>Review</Text>
+              <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />
+            </TouchableOpacity>
+          </View>
+
+          {/* 4. Daily Quiz Challenge Hub Preview */}
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Daily Quiz Slots</Text>
+            <TouchableOpacity onPress={() => router.push('/daily-quiz' as any)}>
+              <Text style={styles.sectionLink}>Open All Quizzes →</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.quizPreviewCard}
+            activeOpacity={0.85}
+            onPress={() => router.push('/daily-quiz' as any)}
+          >
+            <View style={styles.quizPreviewHeader}>
+              <View style={styles.quizPreviewTitleGroup}>
+                <Ionicons name="trophy" size={20} color={COLORS.primary} />
+                <Text style={styles.quizPreviewTitle}>Today’s 3 Challenges</Text>
+              </View>
+              <Text style={styles.quizPreviewScore}>
+                {completedQuizSlots} / 3 Completed
               </Text>
             </View>
-          )}
 
-          {/* Slot Cards */}
-          <Text style={styles.sectionTitle}>Today's Challenges</Text>
+            {/* 3 Slot Mini Badges */}
+            <View style={styles.slotsRow}>
+              {/* Easy */}
+              <View style={[
+                styles.slotPill,
+                dailyQuiz?.slots?.[0]?.completed ? styles.slotPillDone : styles.slotPillPending
+              ]}>
+                <Text style={styles.slotPillLabel}>Easy</Text>
+                <Text style={styles.slotPillReward}>+10★</Text>
+                <Ionicons
+                  name={dailyQuiz?.slots?.[0]?.completed ? 'checkmark-circle' : 'time-outline'}
+                  size={14}
+                  color={dailyQuiz?.slots?.[0]?.completed ? COLORS.success : COLORS.textSecondary}
+                />
+              </View>
 
-          {slots.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Ionicons name="calendar-outline" size={48} color="#C4B5FD" />
-              <Text style={styles.emptyText}>No daily quizzes available today.</Text>
+              {/* Medium */}
+              <View style={[
+                styles.slotPill,
+                dailyQuiz?.slots?.[1]?.completed ? styles.slotPillDone : styles.slotPillPending
+              ]}>
+                <Text style={styles.slotPillLabel}>Medium</Text>
+                <Text style={styles.slotPillReward}>+20★</Text>
+                <Ionicons
+                  name={dailyQuiz?.slots?.[1]?.completed ? 'checkmark-circle' : 'time-outline'}
+                  size={14}
+                  color={dailyQuiz?.slots?.[1]?.completed ? COLORS.success : COLORS.textSecondary}
+                />
+              </View>
+
+              {/* Hard */}
+              <View style={[
+                styles.slotPill,
+                dailyQuiz?.slots?.[2]?.completed ? styles.slotPillDone : styles.slotPillPending
+              ]}>
+                <Text style={styles.slotPillLabel}>Hard</Text>
+                <Text style={styles.slotPillReward}>+30★</Text>
+                <Ionicons
+                  name={dailyQuiz?.slots?.[2]?.completed ? 'checkmark-circle' : 'time-outline'}
+                  size={14}
+                  color={dailyQuiz?.slots?.[2]?.completed ? COLORS.success : COLORS.textSecondary}
+                />
+              </View>
             </View>
-          ) : (
-            slots.map((slot) => {
-              const cfg = SLOT_CONFIG[slot.slot_difficulty] ?? SLOT_CONFIG.easy;
-              return (
-                <View
-                  key={slot.slot_difficulty}
-                  style={[styles.slotCard, { borderTopColor: cfg.borderColor }]}
-                >
-                  {/* Top row: difficulty badge + reward */}
-                  <View style={styles.slotTopRow}>
-                    <View style={[styles.diffBadge, { backgroundColor: cfg.bg }]}>
-                      <Text style={[styles.diffLabel, { color: cfg.color }]}>{cfg.label}</Text>
-                    </View>
-                    <View style={styles.rewardRow}>
-                      <Ionicons name="star" size={15} color="#F59E0B" style={{ marginRight: 3 }} />
-                      <Text style={styles.rewardText}>+{cfg.reward} Stars</Text>
-                    </View>
-                  </View>
+          </TouchableOpacity>
 
-                  {/* Quiz title */}
-                  <Text style={styles.quizTitle} numberOfLines={2}>
-                    {slot.quiz_title ?? (slot.quiz_id === null ? 'No quiz assigned' : `Quiz #${slot.quiz_id}`)}
-                  </Text>
-
-                  {/* State section */}
-                  {slot.completed ? (
-                    <View style={styles.completedRow}>
-                      <Ionicons name="checkmark-circle" size={24} color="#10B981" />
-                      <Text style={styles.completedText}>Completed</Text>
-                      {slot.stars_earned !== null && (
-                        <View style={styles.starsEarnedPill}>
-                          <Ionicons name="star" size={13} color="#F59E0B" style={{ marginRight: 3 }} />
-                          <Text style={styles.starsEarnedText}>+{slot.stars_earned}</Text>
-                        </View>
-                      )}
-                    </View>
-                  ) : slot.quiz_id === null ? (
-                    <View style={styles.lockedRow}>
-                      <Ionicons name="lock-closed-outline" size={18} color="#9CA3AF" style={{ marginRight: 6 }} />
-                      <Text style={styles.lockedText}>No lessons unlocked yet</Text>
-                    </View>
-                  ) : (
-                    <TouchableOpacity
-                      style={styles.startBtn}
-                      onPress={() => handleStartQuiz(slot)}
-                      activeOpacity={0.85}
-                    >
-                      <Ionicons name="play" size={16} color="#fff" style={{ marginRight: 6 }} />
-                      <Text style={styles.startBtnText}>Start Quiz</Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {/* Refresh area */}
-                  <View style={styles.refreshRow}>
-                    {slot.refresh_used ? (
-                      <View style={styles.refreshedPill}>
-                        <Ionicons name="refresh-outline" size={13} color="#9CA3AF" style={{ marginRight: 4 }} />
-                        <Text style={styles.refreshedLabel}>Refreshed</Text>
-                      </View>
-                    ) : slot.can_refresh ? (
-                      <TouchableOpacity
-                        style={styles.refreshSlotBtn}
-                        onPress={() => handleRefreshSlot(slot)}
-                        disabled={refreshingSlot === slot.slot_difficulty}
-                        activeOpacity={0.8}
-                      >
-                        {refreshingSlot === slot.slot_difficulty ? (
-                          <ActivityIndicator size="small" color="#7C3AED" />
-                        ) : (
-                          <>
-                            <Ionicons name="refresh-outline" size={14} color="#7C3AED" style={{ marginRight: 5 }} />
-                            <Text style={styles.refreshSlotBtnText}>Refresh (5</Text>
-                            <Ionicons name="star" size={12} color="#F59E0B" style={{ marginLeft: 3, marginRight: 2 }} />
-                            <Text style={styles.refreshSlotBtnText}>)</Text>
-                          </>
-                        )}
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                </View>
-              );
-            })
-          )}
-
-          {/* Progress Bar */}
-          <View style={styles.progressCard}>
-            <View style={styles.progressLabelRow}>
-              <Text style={styles.progressLabel}>Daily Progress</Text>
-              <Text style={styles.progressCount}>{completedCount}/3 Complete</Text>
-            </View>
-            <View style={styles.progressTrack}>
-              <View
-                style={[
-                  styles.progressFill,
-                  { width: `${Math.round((completedCount / 3) * 100)}%` },
-                ]}
-              />
-            </View>
-            <Text style={styles.progressHint}>
-              {completedCount === 3
-                ? 'All daily quizzes complete!'
-                : `${3 - completedCount} quiz${3 - completedCount === 1 ? '' : 'zes'} remaining today`}
-            </Text>
+          {/* 5. Milestone Trophy Showcase */}
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Trophy Showcase</Text>
+            <TouchableOpacity onPress={() => router.push('/badges' as any)}>
+              <Text style={styles.sectionLink}>
+                {unlockedBadgesCount} / {badges.length} Unlocked →
+              </Text>
+            </TouchableOpacity>
           </View>
+
+          <View style={styles.trophyGrid}>
+            {badges.slice(0, 4).map(badge => (
+              <View
+                key={badge.id}
+                style={[
+                  styles.trophyCard,
+                  badge.unlocked ? styles.trophyCardUnlocked : styles.trophyCardLocked
+                ]}
+              >
+                <View style={[
+                  styles.trophyIconSquircle,
+                  badge.unlocked
+                    ? { backgroundColor: `${badge.color}15`, borderColor: badge.color }
+                    : { backgroundColor: '#F1F5F9', borderColor: '#E2E8F0' }
+                ]}>
+                  <Ionicons
+                    name={badge.icon as any}
+                    size={24}
+                    color={badge.unlocked ? badge.color : '#94A3B8'}
+                  />
+                </View>
+                <Text style={[styles.trophyTitle, !badge.unlocked && { color: '#94A3B8' }]} numberOfLines={1}>
+                  {badge.title}
+                </Text>
+                <Text style={styles.trophyDesc} numberOfLines={2}>
+                  {badge.description}
+                </Text>
+                {badge.unlocked ? (
+                  <View style={styles.badgeUnlockedBadge}>
+                    <Ionicons name="checkmark-circle" size={11} color={COLORS.success} />
+                    <Text style={styles.badgeUnlockedText}>Earned</Text>
+                  </View>
+                ) : (
+                  <View style={styles.badgeLockedBadge}>
+                    <Ionicons name="lock-closed" size={10} color="#94A3B8" />
+                    <Text style={styles.badgeLockedText}>Locked</Text>
+                  </View>
+                )}
+              </View>
+            ))}
+          </View>
+
+          <View style={{ height: 28 }} />
         </ScrollView>
       )}
     </SafeAreaView>
   );
 }
 
-// --- Styles ------------------------------------------------------------------
+// --- Styles -------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  safe: {
+  safeArea: {
     flex: 1,
-    backgroundColor: '#EDE9FE',
+    backgroundColor: COLORS.background, // Anti-glare Slate-50 canvas
   },
   header: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 14,
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'android' ? 44 : 16,
-    paddingBottom: 18,
-    backgroundColor: '#7C3AED',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? 12 : 8,
+    paddingBottom: 12,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
   headerTitle: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#fff',
+    color: COLORS.textPrimary,
+    letterSpacing: -0.3,
   },
-  headerSub: {
+  headerSubtitle: {
     fontSize: 12,
-    color: 'rgba(255,255,255,0.75)',
-    marginTop: 2,
+    color: COLORS.textSecondary,
+    marginTop: 1,
   },
-  headerRefreshBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    justifyContent: 'center',
+  headerStatsRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
   },
-  center: {
+  statPillStars: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.starBg,
+    borderColor: COLORS.starBorder,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 14,
+    gap: 4,
+  },
+  statPillStarsText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  statPillStreak: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.streakBg,
+    borderColor: COLORS.streakBorder,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 14,
+    gap: 4,
+  },
+  statPillStreakText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.streak,
+  },
+  loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingTop: 60,
   },
   loadingText: {
     marginTop: 12,
-    color: '#7C3AED',
     fontSize: 14,
-    fontWeight: '600',
+    color: COLORS.textSecondary,
+    fontWeight: '500',
   },
-  scroll: {
-    paddingHorizontal: 18,
-    paddingTop: 20,
-    paddingBottom: 48,
+  scrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 32,
   },
-  streakCard: {
-    backgroundColor: '#fff',
+  // Streak Banner
+  streakBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.card,
     borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 14,
-    shadowColor: '#7C3AED',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 3,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
   },
-  streakLeft: {
-    flexDirection: 'row',
+  streakBannerActive: {
+    borderColor: COLORS.streakBorder,
+    backgroundColor: '#FFF7ED',
+  },
+  streakBannerBroken: {
+    borderColor: '#FECACA',
+    backgroundColor: '#FEF2F2',
+  },
+  streakIconBox: {
+    width: 44,
+    height: 44,
+    borderRadius: 13,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  streakInfo: {
     flex: 1,
   },
-  streakCount: {
-    fontSize: 17,
+  streakTitle: {
+    fontSize: 15,
     fontWeight: '700',
-    color: '#1F2937',
+    color: COLORS.textPrimary,
   },
-  streakSub: {
+  streakDesc: {
     fontSize: 12,
-    color: '#6B7280',
+    color: COLORS.textSecondary,
     marginTop: 2,
+    lineHeight: 16,
   },
-  repairBtn: {
+  repairButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#7C3AED',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
+    backgroundColor: COLORS.streak,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 12,
+    gap: 4,
     marginLeft: 8,
   },
-  repairBtnText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 13,
+  repairButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
-  fullClearBanner: {
+  // Section Headers
+  sectionHeaderRow: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#FEF3C7',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: '#FCD34D',
-  },
-  fullClearText: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#92400E',
-    lineHeight: 20,
+    marginBottom: 10,
+    marginTop: 4,
   },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#4C1D95',
-    marginBottom: 12,
-    letterSpacing: 0.2,
+    color: COLORS.textPrimary,
+    letterSpacing: -0.2,
   },
-  slotCard: {
-    backgroundColor: '#fff',
+  sectionBadge: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.primary,
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  sectionLink: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  // Mission Card
+  missionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.card,
     borderRadius: 16,
-    padding: 16,
-    marginBottom: 14,
-    borderTopWidth: 4,
-    shadowColor: '#7C3AED',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 13,
+    marginBottom: 10,
+    elevation: 1,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
   },
-  slotTopRow: {
+  missionIconBox: {
+    width: 44,
+    height: 44,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  missionContent: {
+    flex: 1,
+  },
+  missionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  missionTitle: {
+    fontSize: 14.5,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  rewardTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.starBg,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    gap: 2,
+  },
+  rewardTagText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  missionDesc: {
+    fontSize: 11.5,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  missionProgressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    gap: 8,
+  },
+  missionProgressBarBg: {
+    flex: 1,
+    height: 5,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  missionProgressBarFill: {
+    height: 5,
+    borderRadius: 3,
+  },
+  missionProgressText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+  },
+  claimButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  claimButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  claimedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.successBg,
+    borderColor: COLORS.successBorder,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 12,
+    gap: 3,
+    marginLeft: 8,
+  },
+  claimedPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.success,
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    gap: 3,
+    marginLeft: 8,
+  },
+  actionButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  // Quiz Preview Card
+  quizPreviewCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 14,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+  },
+  quizPreviewHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
   },
-  diffBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 20,
+  quizPreviewTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
-  diffLabel: {
+  quizPreviewTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  quizPreviewScore: {
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    color: COLORS.primary,
   },
-  rewardRow: {
+  slotsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-  },
-  rewardText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#6B7280',
-  },
-  quizTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginBottom: 12,
-    lineHeight: 21,
-  },
-  completedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
   },
-  completedText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#10B981',
+  slotPill: {
     flex: 1,
-  },
-  starsEarnedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEF3C7',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
-  },
-  starsEarnedText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#D97706',
-  },
-  lockedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  lockedText: {
-    fontSize: 13,
-    color: '#9CA3AF',
-    fontStyle: 'italic',
-  },
-  startBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#7C3AED',
+    paddingVertical: 8,
+    paddingHorizontal: 6,
     borderRadius: 12,
-    paddingVertical: 11,
+    borderWidth: 1,
+    gap: 4,
+  },
+  slotPillDone: {
+    backgroundColor: COLORS.successBg,
+    borderColor: COLORS.successBorder,
+  },
+  slotPillPending: {
+    backgroundColor: '#F8FAFC',
+    borderColor: COLORS.border,
+  },
+  slotPillLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  slotPillReward: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#B45309',
+  },
+  // Trophy Grid
+  trophyGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  trophyCard: {
+    width: '48%',
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    alignItems: 'center',
+    elevation: 1,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+  },
+  trophyCardUnlocked: {
+    borderColor: COLORS.primaryBorder,
+  },
+  trophyCardLocked: {
+    borderColor: COLORS.border,
+    opacity: 0.75,
+  },
+  trophyIconSquircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: 8,
   },
-  startBtnText: {
-    color: '#fff',
+  trophyTitle: {
+    fontSize: 13.5,
     fontWeight: '700',
-    fontSize: 15,
+    color: COLORS.textPrimary,
+    marginBottom: 2,
+    textAlign: 'center',
   },
-  refreshRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 4,
+  trophyDesc: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+    lineHeight: 14,
+    marginBottom: 8,
   },
-  refreshSlotBtn: {
+  badgeUnlockedBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-    backgroundColor: '#EDE9FE',
+    backgroundColor: COLORS.successBg,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 3,
   },
-  refreshSlotBtnText: {
-    fontSize: 12,
+  badgeUnlockedText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: COLORS.success,
+  },
+  badgeLockedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 3,
+  },
+  badgeLockedText: {
+    fontSize: 10.5,
     fontWeight: '600',
-    color: '#7C3AED',
-  },
-  refreshedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-  },
-  refreshedLabel: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    fontWeight: '500',
-  },
-  progressCard: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    marginTop: 6,
-    shadowColor: '#7C3AED',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  progressLabelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  progressLabel: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#4C1D95',
-  },
-  progressCount: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#7C3AED',
-  },
-  progressTrack: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#EDE9FE',
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 6,
-    backgroundColor: '#7C3AED',
-  },
-  progressHint: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginTop: 8,
-    textAlign: 'center',
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    gap: 12,
-  },
-  emptyText: {
-    fontSize: 15,
-    color: '#6B7280',
-    textAlign: 'center',
+    color: '#94A3B8',
   },
 });

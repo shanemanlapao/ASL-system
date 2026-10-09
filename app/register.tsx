@@ -31,13 +31,16 @@ export default function RegisterScreen() {
   const [usernameError, setUsernameError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [confirmError, setConfirmError] = useState("");
+  const [termsError, setTermsError] = useState("");
   const [globalError, setGlobalError] = useState("");
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
 
   const clearErrors = () => {
     setNameError("");
     setUsernameError("");
     setPasswordError("");
     setConfirmError("");
+    setTermsError("");
     setGlobalError("");
   };
 
@@ -49,6 +52,7 @@ export default function RegisterScreen() {
     if (!password.trim()) { setPasswordError("Password is required."); valid = false; }
     else if (password.length < 6) { setPasswordError("Password must be at least 6 characters."); valid = false; }
     if (password !== confirmPassword) { setConfirmError("Passwords do not match."); valid = false; }
+    if (!agreedToTerms) { setTermsError("Please agree to the Terms of Service & Privacy Policy."); valid = false; }
     return valid;
   };
 
@@ -195,10 +199,50 @@ export default function RegisterScreen() {
               {confirmError ? <Text style={styles.fieldError}>{confirmError}</Text> : null}
             </View>
 
+            {/* Terms & Privacy Consent Checkbox */}
+            <View style={{ marginVertical: 12 }}>
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}
+                activeOpacity={0.8}
+                onPress={() => { setAgreedToTerms(!agreedToTerms); setTermsError(""); }}
+              >
+                <View style={{
+                  width: 22,
+                  height: 22,
+                  borderRadius: 6,
+                  borderWidth: 2,
+                  borderColor: agreedToTerms ? '#7C3AED' : '#94A3B8',
+                  backgroundColor: agreedToTerms ? '#7C3AED' : '#FFFFFF',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginTop: 2
+                }}>
+                  {agreedToTerms && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
+                </View>
+                <Text style={{ flex: 1, fontSize: 13, color: '#475569', lineHeight: 20 }}>
+                  I agree to the{' '}
+                  <Text
+                    style={{ color: '#7C3AED', fontWeight: '700', textDecorationLine: 'underline' }}
+                    onPress={() => router.push('/legal?tab=terms' as any)}
+                  >
+                    Terms of Service
+                  </Text>
+                  {' '}and{' '}
+                  <Text
+                    style={{ color: '#7C3AED', fontWeight: '700', textDecorationLine: 'underline' }}
+                    onPress={() => router.push('/legal?tab=privacy' as any)}
+                  >
+                    Privacy Policy
+                  </Text>.
+                </Text>
+              </TouchableOpacity>
+              {termsError ? <Text style={styles.fieldError}>{termsError}</Text> : null}
+            </View>
+
             <TouchableOpacity
-              style={[styles.registerButton, loading && styles.registerButtonDisabled]}
+              style={[styles.registerButton, (!agreedToTerms || loading) && styles.registerButtonDisabled]}
               onPress={handleRegister}
-              disabled={loading}
+              disabled={!agreedToTerms || loading}
             >
               {loading ? (
                 <ActivityIndicator size="small" color="white" />

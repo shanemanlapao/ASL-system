@@ -1,9 +1,19 @@
-import { View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, ActivityIndicator } from "react-native";
+import React, { useState, useEffect, useMemo } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  ScrollView,
+  TouchableOpacity,
+  ActivityIndicator,
+  Platform,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
-import { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { API_URL } from "../context/config";
+import { COLORS } from "../context/theme";
 
 interface TopicBreakdown {
   topic_id: string;
@@ -26,7 +36,7 @@ interface RecentAttempt {
   difficulty: string;
   accuracy: number;
   time_spent_seconds: number;
-  completed_at: string;
+  completed_at: string | null;
 }
 
 interface ReportData {
@@ -40,6 +50,21 @@ interface ReportData {
   recent_attempts: RecentAttempt[];
 }
 
+interface GroupedQuizAttempt {
+  key: string;
+  quiz_title: string;
+  difficulty: string;
+  attempts: RecentAttempt[];
+  totalTries: number;
+  bestScore: number;
+  bestTotal: number;
+  bestAccuracy: number;
+  latestScore: number;
+  latestTotal: number;
+  latestAccuracy: number;
+  latestTimeSeconds: number;
+}
+
 export default function ReportScreen() {
   const { user } = useAuth();
   const userId = user?.id || 1;
@@ -47,6 +72,16 @@ export default function ReportScreen() {
   const [report, setReport] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState(true);
   const [streak, setStreak] = useState<any>(null);
+
+  // Accordion expanded state for each quiz group key
+  const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({});
+
+  const toggleExpand = (key: string) => {
+    setExpandedKeys((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
 
   const fetchReport = async () => {
     try {
@@ -66,14 +101,18 @@ export default function ReportScreen() {
     try {
       const res = await fetch(`${API_URL}/student/${userId}/streak`);
       if (res.ok) setStreak(await res.json());
-    } catch { /* silent */ }
+    } catch {
+      /* silent */
+    }
   };
 
   const handleRepairStreak = async () => {
     try {
-      const res = await fetch(`${API_URL}/student/${userId}/repair-streak`, { method: 'POST' });
+      const res = await fetch(`${API_URL}/student/${userId}/repair-streak`, { method: "POST" });
       if (res.ok) fetchStreak();
-    } catch { /* silent */ }
+    } catch {
+      /* silent */
+    }
   };
 
   useEffect(() => {
@@ -81,10 +120,57 @@ export default function ReportScreen() {
     fetchStreak();
   }, [userId]);
 
-  const StatCard = ({ icon, value, label, bgColor, iconColor }: { icon: any, value: string, label: string, bgColor: string, iconColor: string }) => (
+  // Group attempts by unique Quiz Title & Difficulty
+  const groupedAttempts: GroupedQuizAttempt[] = useMemo(() => {
+    if (!report?.recent_attempts || report.recent_attempts.length === 0) return [];
+    const map: Record<string, GroupedQuizAttempt> = {};
+
+    for (const ra of report.recent_attempts) {
+      const key = `${ra.quiz_title}___${ra.difficulty}`;
+      if (!map[key]) {
+        map[key] = {
+          key,
+          quiz_title: ra.quiz_title,
+          difficulty: ra.difficulty,
+          attempts: [],
+          totalTries: 0,
+          bestScore: ra.score,
+          bestTotal: ra.total,
+          bestAccuracy: ra.accuracy,
+          latestScore: ra.score,
+          latestTotal: ra.total,
+          latestAccuracy: ra.accuracy,
+          latestTimeSeconds: ra.time_spent_seconds,
+        };
+      }
+      map[key].attempts.push(ra);
+      map[key].totalTries += 1;
+      if (ra.accuracy > map[key].bestAccuracy) {
+        map[key].bestAccuracy = ra.accuracy;
+        map[key].bestScore = ra.score;
+        map[key].bestTotal = ra.total;
+      }
+    }
+
+    return Object.values(map);
+  }, [report?.recent_attempts]);
+
+  const StatCard = ({
+    icon,
+    value,
+    label,
+    bgColor,
+    iconColor,
+  }: {
+    icon: any;
+    value: string;
+    label: string;
+    bgColor: string;
+    iconColor: string;
+  }) => (
     <View style={[styles.statCard, { backgroundColor: bgColor }]}>
-      <View style={[styles.statIconContainer, { backgroundColor: iconColor + '33' }]}>
-        <Ionicons name={icon} size={24} color={iconColor} />
+      <View style={[styles.statIconContainer, { backgroundColor: iconColor + "22" }]}>
+        <Ionicons name={icon} size={22} color={iconColor} />
       </View>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
@@ -92,17 +178,27 @@ export default function ReportScreen() {
   );
 
   const formatTime = (seconds: number) => {
-    if (seconds < 60) return `${seconds}s`;
+    if (!seconds || seconds < 60) return `${seconds || 0}s`;
     const mins = Math.floor(seconds / 60);
-    return `${mins}m`;
+    const remainder = seconds % 60;
+    return remainder > 0 ? `${mins}m ${remainder}s` : `${mins}m`;
+  };
+
+  const getDifficultyColor = (diff: string) => {
+    const d = (diff || "easy").toLowerCase();
+    if (d === "hard") return { text: COLORS.hard, bg: COLORS.hardBg, border: COLORS.hardBorder };
+    if (d === "medium") return { text: COLORS.medium, bg: COLORS.mediumBg, border: COLORS.mediumBorder };
+    return { text: COLORS.easy, bg: COLORS.easyBg, border: COLORS.easyBorder };
   };
 
   if (loading) {
     return (
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color="#12B3C9" />
-          <Text style={{ marginTop: 10, color: '#6B7280' }}>Loading your learning report...</Text>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={{ marginTop: 12, color: COLORS.textSecondary, fontWeight: "500" }}>
+            Loading your learning report...
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -112,58 +208,73 @@ export default function ReportScreen() {
     <SafeAreaView style={styles.safeArea}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#12B3C9" />
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => router.back()}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Ionicons name="arrow-back" size={24} color={COLORS.primary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Learning Report ({user?.name || "Student"})</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            Learning Report
+          </Text>
+          <Text style={styles.headerSub}>@{user?.username || "student"}</Text>
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         {/* Stats Grid */}
         <View style={styles.statsGrid}>
           <StatCard
             icon="star"
             value={report?.total_stars.toString() || "0"}
             label="Total Stars"
-            bgColor="#E0F2FE"
-            iconColor="#0284C7"
+            bgColor="#FFFBEB"
+            iconColor="#D97706"
           />
           <StatCard
             icon="scan-circle-outline"
             value={`${report?.overall_accuracy || 0}%`}
             label="Accuracy"
-            bgColor="#FFEDD5"
-            iconColor="#EA580C"
+            bgColor="#ECFDF5"
+            iconColor="#10B981"
           />
           <StatCard
             icon="time-outline"
             value={formatTime(report?.total_time_spent_seconds || 0)}
             label="Time Spent"
-            bgColor="#D1FAE5"
-            iconColor="#059669"
+            bgColor={COLORS.primaryLight}
+            iconColor={COLORS.primary}
           />
           <StatCard
             icon="ribbon-outline"
             value={report?.quizzes_completed.toString() || "0"}
             label="Quizzes Done"
-            bgColor="#F3E8FF"
-            iconColor="#9333EA"
+            bgColor="#EEF2FF"
+            iconColor="#4F46E5"
           />
         </View>
 
-        {/* Phase 3: Streak Widget */}
+        {/* Learning Streak Widget */}
         <View style={styles.streakCard}>
           <View style={styles.streakLeft}>
-            <Ionicons name="flame" size={32} color={streak?.active_today ? '#F97316' : '#D1D5DB'} />
+            <View style={styles.streakIconCircle}>
+              <Ionicons
+                name="flame"
+                size={24}
+                color={streak?.active_today ? COLORS.streak : "#94A3B8"}
+              />
+            </View>
             <View style={{ marginLeft: 12 }}>
               <Text style={styles.streakCount}>{streak?.current_streak ?? 0} Day Streak</Text>
-              <Text style={styles.streakSub}>Longest: {streak?.longest_streak ?? 0} days</Text>
+              <Text style={styles.streakSub}>Longest record: {streak?.longest_streak ?? 0} days</Text>
             </View>
           </View>
           {streak?.can_repair && (
             <TouchableOpacity style={styles.repairBtn} onPress={handleRepairStreak}>
               <Ionicons name="build-outline" size={14} color="white" />
-              <Text style={styles.repairBtnText}>Repair (30 Stars)</Text>
+              <Text style={styles.repairBtnText}>Repair (30★)</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -171,42 +282,200 @@ export default function ReportScreen() {
         {/* Phase 3: Daily Quiz entry point */}
         <TouchableOpacity
           style={styles.dailyQuizBanner}
-          onPress={() => router.push('/quest' as any)}
+          onPress={() => router.push("/quest" as any)}
+          activeOpacity={0.85}
         >
-          <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-            <Ionicons name="calendar-outline" size={22} color="#7C3AED" style={{ marginRight: 10 }} />
-            <View>
-              <Text style={styles.dailyQuizTitle}>Daily Quizzes</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
+            <View style={styles.bannerIconBox}>
+              <Ionicons name="trophy" size={20} color={COLORS.primary} />
+            </View>
+            <View style={{ marginLeft: 12 }}>
+              <Text style={styles.dailyQuizTitle}>Daily Quizzes & Quests</Text>
               <Text style={styles.dailyQuizSub}>Complete 3 daily challenges for bonus stars</Text>
             </View>
           </View>
-          <Ionicons name="chevron-forward" size={20} color="#7C3AED" />
+          <Ionicons name="chevron-forward" size={18} color={COLORS.primary} />
         </TouchableOpacity>
 
         {/* ── Phase 2: Skill Tree Banner ── */}
         <TouchableOpacity
           style={styles.skillTreeBanner}
-          onPress={() => router.push('/skill-tree' as any)}
+          onPress={() => router.push("/skill-tree" as any)}
+          activeOpacity={0.85}
         >
-          <View style={{ flex: 1 }}>
-            <Text style={styles.skillTreeTitle}>View Skill Tree</Text>
-            <Text style={styles.skillTreeSub}>See your BKT mastery per knowledge component</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
+            <View style={[styles.bannerIconBox, { backgroundColor: "#EDE9FE" }]}>
+              <Ionicons name="git-network-outline" size={20} color={COLORS.primary} />
+            </View>
+            <View style={{ marginLeft: 12 }}>
+              <Text style={styles.skillTreeTitle}>View Skill Mastery Tree</Text>
+              <Text style={styles.skillTreeSub}>See your pyBKT knowledge tracing progress</Text>
+            </View>
           </View>
-          <Ionicons name="chevron-forward" size={20} color="#7C3AED" />
+          <Ionicons name="chevron-forward" size={18} color={COLORS.primary} />
         </TouchableOpacity>
+
+        {/* Grouped Recent Quiz Attempts (Accordion View) */}
+        {groupedAttempts.length > 0 && (
+          <View style={styles.sectionWrapper}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionTitle}>Recent Quiz Attempts</Text>
+              <Text style={styles.sectionCounter}>
+                {groupedAttempts.length} {groupedAttempts.length === 1 ? "Quiz" : "Quizzes"}
+              </Text>
+            </View>
+
+            <View style={styles.groupedListContainer}>
+              {groupedAttempts.map((group) => {
+                const isExpanded = !!expandedKeys[group.key];
+                const diffStyle = getDifficultyColor(group.difficulty);
+                const isPassed = group.bestAccuracy >= 70;
+
+                return (
+                  <View key={group.key} style={styles.groupedCard}>
+                    {/* Main Touchable Row: Acts as 1 Clean Card */}
+                    <TouchableOpacity
+                      style={styles.groupCardHeader}
+                      onPress={() => toggleExpand(group.key)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={{ flex: 1 }}>
+                        {/* Title */}
+                        <Text style={styles.groupQuizTitle}>{group.quiz_title}</Text>
+
+                        {/* Badges Row */}
+                        <View style={styles.groupBadgesRow}>
+                          {/* Difficulty Pill */}
+                          <View
+                            style={[
+                              styles.diffPill,
+                              { backgroundColor: diffStyle.bg, borderColor: diffStyle.border },
+                            ]}
+                          >
+                            <Text style={[styles.diffPillText, { color: diffStyle.text }]}>
+                              {group.difficulty.toUpperCase()}
+                            </Text>
+                          </View>
+
+                          {/* Tries Count Pill */}
+                          <View style={styles.triesPill}>
+                            <Ionicons name="repeat" size={12} color={COLORS.primary} />
+                            <Text style={styles.triesPillText}>
+                              {group.totalTries} {group.totalTries === 1 ? "Try" : "Tries"}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      {/* Best Score & Expand Trigger */}
+                      <View style={styles.groupScoreRight}>
+                        <View style={styles.bestScoreBox}>
+                          <Text
+                            style={[
+                              styles.bestScoreText,
+                              isPassed ? { color: COLORS.success } : { color: COLORS.error },
+                            ]}
+                          >
+                            {group.bestScore}/{group.bestTotal}
+                          </Text>
+                          <Text style={styles.bestScoreAccuracy}>
+                            {group.bestAccuracy}% Best
+                          </Text>
+                        </View>
+
+                        <View style={styles.expandChevronCircle}>
+                          <Ionicons
+                            name={isExpanded ? "chevron-up" : "chevron-down"}
+                            size={18}
+                            color={COLORS.primary}
+                          />
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+
+                    {/* Expandable Attempt History Breakdown */}
+                    {isExpanded && (
+                      <View style={styles.expandedAttemptsContainer}>
+                        <View style={styles.expandedHeaderRow}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                            <Ionicons name="time-outline" size={14} color={COLORS.textSecondary} />
+                            <Text style={styles.expandedHeaderTitle}>
+                              Attempt History ({group.totalTries} {group.totalTries === 1 ? "try" : "tries"})
+                            </Text>
+                          </View>
+                          <Text style={styles.expandedHeaderSubtitle}>Newest First</Text>
+                        </View>
+
+                        {group.attempts.map((att, attIdx) => {
+                          const tryNumber = group.attempts.length - attIdx;
+                          const attPassed = att.accuracy >= 70;
+                          const isLatest = attIdx === 0;
+
+                          return (
+                            <View
+                              key={attIdx}
+                              style={[
+                                styles.attemptItemRow,
+                                attIdx !== group.attempts.length - 1 && styles.attemptItemBorder,
+                              ]}
+                            >
+                              <View style={styles.attemptLeft}>
+                                <View style={styles.tryBadge}>
+                                  <Text style={styles.tryBadgeText}>#{tryNumber}</Text>
+                                </View>
+                                <View>
+                                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                                    <Text style={styles.attemptTryLabel}>
+                                      Try {tryNumber}
+                                    </Text>
+                                    {isLatest && (
+                                      <View style={styles.latestPill}>
+                                        <Text style={styles.latestPillText}>Latest</Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                  <Text style={styles.attemptTimeText}>
+                                    Time: {formatTime(att.time_spent_seconds)}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              <View style={styles.attemptScoreRight}>
+                                <Text
+                                  style={[
+                                    styles.attemptScoreValue,
+                                    attPassed ? { color: COLORS.success } : { color: COLORS.error },
+                                  ]}
+                                >
+                                  {att.score}/{att.total} ({att.accuracy}%)
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        )}
 
         {/* Topic Breakdown */}
         <Text style={styles.sectionTitle}>Topic Performance</Text>
         <View style={styles.sectionCard}>
-          {(!report?.topic_breakdown || report.topic_breakdown.length === 0) ? (
-            <Text style={styles.emptyText}>No quizzes completed yet. Start learning to see performance!</Text>
+          {!report?.topic_breakdown || report.topic_breakdown.length === 0 ? (
+            <Text style={styles.emptyText}>
+              No quizzes completed yet. Start learning to see performance!
+            </Text>
           ) : (
             report.topic_breakdown.map((t, idx) => (
               <View key={idx} style={styles.subjectRow}>
                 <View style={styles.subjectHeader}>
                   <View style={styles.subjectInfoLeft}>
-                    <View style={[styles.subjectIconBg, { backgroundColor: '#0284C722' }]}>
-                      <Ionicons name="book-outline" size={20} color="#0284C7" />
+                    <View style={styles.subjectIconBg}>
+                      <Ionicons name="book-outline" size={18} color={COLORS.primary} />
                     </View>
                     <View>
                       <Text style={styles.subjectName}>{t.topic_id.toUpperCase()}</Text>
@@ -215,10 +484,20 @@ export default function ReportScreen() {
                       </Text>
                     </View>
                   </View>
-                  <Text style={[styles.subjectPercentage, { color: '#0284C7' }]}>{t.avg_accuracy}%</Text>
+                  <Text style={[styles.subjectPercentage, { color: COLORS.primary }]}>
+                    {t.avg_accuracy}%
+                  </Text>
                 </View>
                 <View style={styles.progressBarBg}>
-                  <View style={[styles.progressBarFill, { width: `${Math.min(100, t.avg_accuracy)}%`, backgroundColor: '#0284C7' }]} />
+                  <View
+                    style={[
+                      styles.progressBarFill,
+                      {
+                        width: `${Math.min(100, t.avg_accuracy)}%`,
+                        backgroundColor: COLORS.primary,
+                      },
+                    ]}
+                  />
                 </View>
               </View>
             ))
@@ -228,15 +507,17 @@ export default function ReportScreen() {
         {/* Areas to Improve */}
         <Text style={styles.sectionTitle}>Areas to Improve</Text>
         <View style={styles.improvementCard}>
-          {(!report?.weak_topics || report.weak_topics.length === 0) ? (
-            <View style={{ paddingVertical: 10, alignItems: 'center' }}>
-              <Ionicons name="checkmark-circle-outline" size={32} color="#10B981" />
-              <Text style={{ color: '#10B981', fontWeight: 'bold', marginTop: 6 }}>Great job! No weak topics detected.</Text>
+          {!report?.weak_topics || report.weak_topics.length === 0 ? (
+            <View style={{ paddingVertical: 12, alignItems: "center" }}>
+              <Ionicons name="checkmark-circle-outline" size={32} color={COLORS.success} />
+              <Text style={{ color: COLORS.success, fontWeight: "700", marginTop: 6 }}>
+                Great job! No weak topics detected.
+              </Text>
             </View>
           ) : (
             <>
               <View style={styles.warningHeader}>
-                <Ionicons name="warning-outline" size={20} color="#EF4444" style={styles.warningIcon} />
+                <Ionicons name="warning-outline" size={20} color={COLORS.error} />
                 <Text style={styles.warningText}>Topics with accuracy below 70%</Text>
               </View>
 
@@ -253,40 +534,22 @@ export default function ReportScreen() {
               ))}
 
               <View style={styles.tipBox}>
-                <Ionicons name="bulb" size={18} color="#FACC15" style={styles.tipIcon} />
-                <Text style={styles.tipText}>Practice these topics more to unlock higher difficulty levels!</Text>
+                <Ionicons name="bulb" size={18} color="#D97706" />
+                <Text style={styles.tipText}>
+                  Practice these topics more to unlock higher difficulty levels!
+                </Text>
               </View>
             </>
           )}
         </View>
 
-        {/* Recent Attempts */}
-        {report?.recent_attempts && report.recent_attempts.length > 0 && (
-          <>
-            <Text style={styles.sectionTitle}>Recent Quiz Attempts</Text>
-            <View style={styles.sectionCard}>
-              {report.recent_attempts.map((ra, idx) => (
-                <View key={idx} style={styles.recentRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.recentTitle}>{ra.quiz_title}</Text>
-                    <Text style={styles.recentSub}>
-                      {ra.difficulty.toUpperCase()} • {formatTime(ra.time_spent_seconds)}
-                    </Text>
-                  </View>
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Text style={[styles.recentScore, ra.accuracy >= 70 ? { color: '#10B981' } : { color: '#EF4444' }]}>
-                      {ra.score}/{ra.total} ({ra.accuracy}%)
-                    </Text>
-                  </View>
-                </View>
-              ))}
-            </View>
-          </>
-        )}
-
         {/* Action Button */}
-        <TouchableOpacity style={styles.continueButton} onPress={() => router.back()}>
-          <Text style={styles.continueButtonText}>Continue Learning</Text>
+        <TouchableOpacity
+          style={styles.continueButton}
+          onPress={() => router.back()}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.continueButtonText}>Back to Dashboard</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
@@ -294,75 +557,378 @@ export default function ReportScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F8F9FA" },
-  centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 40, paddingBottom: 20, backgroundColor: '#F8F9FA' },
-  backButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#E0F2FE', justifyContent: 'center', alignItems: 'center', marginRight: 16 },
-  headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#1F2937' },
-  container: { padding: 20, paddingBottom: 40 },
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 24 },
-  statCard: { width: '48%', borderRadius: 16, padding: 16, alignItems: 'center' },
-  statIconContainer: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
-  statValue: { fontSize: 22, fontWeight: 'bold', color: '#1F2937' },
-  statLabel: { fontSize: 12, color: '#6B7280', fontWeight: '500' },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#1F2937', marginBottom: 12 },
-  sectionCard: { backgroundColor: 'white', borderRadius: 16, padding: 18, marginBottom: 24, borderWidth: 1, borderColor: '#E5E7EB' },
-  emptyText: { color: '#6B7280', textAlign: 'center', paddingVertical: 10 },
+  safeArea: { flex: 1, backgroundColor: COLORS.background },
+  centerContainer: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === "android" ? 14 : 10,
+    paddingBottom: 12,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 14,
+  },
+  headerTitle: { fontSize: 20, fontWeight: "700", color: COLORS.textPrimary },
+  headerSub: { fontSize: 13, color: COLORS.textSecondary, marginTop: 1 },
+  container: { padding: 16, paddingBottom: 40 },
+  statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 },
+  statCard: {
+    width: "48%",
+    borderRadius: 16,
+    padding: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  statIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  statValue: { fontSize: 20, fontWeight: "700", color: COLORS.textPrimary },
+  statLabel: { fontSize: 12, color: COLORS.textSecondary, fontWeight: "600", marginTop: 2 },
+  sectionTitle: { fontSize: 15, fontWeight: "700", color: COLORS.textPrimary, marginBottom: 10, marginLeft: 2 },
+  sectionWrapper: { marginBottom: 18 },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
+    marginHorizontal: 2,
+  },
+  sectionCounter: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: COLORS.textSecondary,
+    backgroundColor: COLORS.cardSecondary,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  sectionCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    elevation: 2,
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+  },
+  emptyText: { color: COLORS.textSecondary, textAlign: "center", paddingVertical: 10 },
   subjectRow: { marginBottom: 16 },
-  subjectHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  subjectInfoLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  subjectIconBg: { width: 36, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-  subjectName: { fontSize: 15, fontWeight: 'bold', color: '#1F2937' },
-  subjectStats: { fontSize: 12, color: '#6B7280' },
-  subjectPercentage: { fontSize: 16, fontWeight: 'bold' },
-  progressBarBg: { height: 8, backgroundColor: '#F3F4F6', borderRadius: 4, overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 4 },
-  improvementCard: { backgroundColor: 'white', borderRadius: 16, padding: 18, marginBottom: 24, borderWidth: 1, borderColor: '#E5E7EB' },
-  warningHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
-  warningIcon: { marginRight: 2 },
-  warningText: { fontSize: 13, color: '#EF4444', fontWeight: '600' },
-  topicRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
-  topicName: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
-  topicSubject: { fontSize: 12, color: '#6B7280' },
-  scoreBadge: { backgroundColor: '#FEE2E2', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
-  scoreText: { color: '#EF4444', fontWeight: 'bold', fontSize: 13 },
-  tipBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FEF9C3', padding: 12, borderRadius: 10, marginTop: 14 },
-  tipIcon: { marginRight: 2 },
-  tipText: { fontSize: 12, color: '#854D0E', flex: 1, fontWeight: '500' },
-  recentRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
-  recentTitle: { fontSize: 14, fontWeight: '600', color: '#1F2937' },
-  recentSub: { fontSize: 12, color: '#6B7280' },
-  recentScore: { fontSize: 14, fontWeight: 'bold' },
-  continueButton: { backgroundColor: '#0284C7', paddingVertical: 16, borderRadius: 12, alignItems: 'center', marginTop: 10 },
-  continueButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  subjectHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  subjectInfoLeft: { flexDirection: "row", alignItems: "center", gap: 10 },
+  subjectIconBg: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  subjectName: { fontSize: 14, fontWeight: "700", color: COLORS.textPrimary },
+  subjectStats: { fontSize: 12, color: COLORS.textSecondary, marginTop: 1 },
+  subjectPercentage: { fontSize: 15, fontWeight: "700" },
+  progressBarBg: { height: 8, backgroundColor: "#F1F5F9", borderRadius: 4, overflow: "hidden" },
+  progressBarFill: { height: "100%", borderRadius: 4 },
+  improvementCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  warningHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 },
+  warningText: { fontSize: 13, color: COLORS.error, fontWeight: "700" },
+  topicRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderLight,
+  },
+  topicName: { fontSize: 14, fontWeight: "600", color: COLORS.textPrimary },
+  topicSubject: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
+  scoreBadge: { backgroundColor: COLORS.errorBg, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
+  scoreText: { color: COLORS.error, fontWeight: "700", fontSize: 13 },
+  tipBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#FFFBEB",
+    padding: 12,
+    borderRadius: 12,
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+  },
+  tipText: { fontSize: 12, color: "#92400E", flex: 1, fontWeight: "500" },
+  continueButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 15,
+    borderRadius: 14,
+    alignItems: "center",
+    marginTop: 4,
+    elevation: 3,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
+  },
+  continueButtonText: { color: "white", fontWeight: "700", fontSize: 16 },
   skillTreeBanner: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#F5F3FF', borderWidth: 1.5, borderColor: '#DDD6FE',
-    borderRadius: 16, padding: 16, marginBottom: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.primaryBorder,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 16,
+    elevation: 1,
   },
-  skillTreeTitle: { fontSize: 16, fontWeight: 'bold', color: '#5B21B6' },
-  skillTreeSub: { fontSize: 12, color: '#7C3AED', marginTop: 2 },
-  // Phase 3 styles
+  bannerIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  skillTreeTitle: { fontSize: 15, fontWeight: "700", color: COLORS.textPrimary },
+  skillTreeSub: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
   streakCard: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: 'white', borderRadius: 16, padding: 16,
-    marginBottom: 16, borderWidth: 1, borderColor: '#E5E7EB',
-    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4, elevation: 2,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
-  streakLeft: { flexDirection: 'row', alignItems: 'center' },
-  streakCount: { fontSize: 18, fontWeight: 'bold', color: '#1F2937' },
-  streakSub: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  streakLeft: { flexDirection: "row", alignItems: "center" },
+  streakIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.streakBg,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  streakCount: { fontSize: 16, fontWeight: "700", color: COLORS.textPrimary },
+  streakSub: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
   repairBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: '#7C3AED', borderRadius: 10,
-    paddingHorizontal: 12, paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: COLORS.primary,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
-  repairBtnText: { color: 'white', fontSize: 12, fontWeight: '600' },
+  repairBtnText: { color: "white", fontSize: 12, fontWeight: "700" },
   dailyQuizBanner: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#F5F3FF', borderWidth: 1.5, borderColor: '#DDD6FE',
-    borderRadius: 16, padding: 16, marginBottom: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 14,
   },
-  dailyQuizTitle: { fontSize: 16, fontWeight: 'bold', color: '#5B21B6' },
-  dailyQuizSub: { fontSize: 12, color: '#7C3AED', marginTop: 2 },
+  dailyQuizTitle: { fontSize: 15, fontWeight: "700", color: COLORS.textPrimary },
+  dailyQuizSub: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
+
+  // Grouped Attempts Accordion Styles
+  groupedListContainer: {
+    gap: 12,
+  },
+  groupedCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    overflow: "hidden",
+    elevation: 2,
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+  },
+  groupCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 14,
+    minHeight: 64,
+  },
+  groupQuizTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+    marginBottom: 6,
+  },
+  groupBadgesRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  diffPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  diffPillText: {
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  triesPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  triesPillText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+  groupScoreRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginLeft: 8,
+  },
+  bestScoreBox: {
+    alignItems: "flex-end",
+  },
+  bestScoreText: {
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  bestScoreAccuracy: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    fontWeight: "600",
+    marginTop: 1,
+  },
+  expandChevronCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  // Expanded History Panel
+  expandedAttemptsContainer: {
+    backgroundColor: "#F8FAFC",
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  expandedHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderLight,
+  },
+  expandedHeaderTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.textSecondary,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  expandedHeaderSubtitle: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    fontWeight: "500",
+  },
+  attemptItemRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+  },
+  attemptItemBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#EDF2F7",
+  },
+  attemptLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  tryBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: "#E2E8F0",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  tryBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.textPrimary,
+  },
+  attemptTryLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.textPrimary,
+  },
+  latestPill: {
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  latestPillText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+  attemptTimeText: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  attemptScoreRight: {
+    alignItems: "flex-end",
+  },
+  attemptScoreValue: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
 });

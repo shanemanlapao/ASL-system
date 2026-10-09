@@ -9,6 +9,7 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  Image,
   Platform,
   Modal,
   KeyboardAvoidingView,
@@ -35,6 +36,7 @@ interface UserRecord {
   name: string;
   username: string;
   role: 'admin' | 'teacher' | 'student';
+  avatar_url?: string | null;
   password?: string;
   created_at?: string;
 }
@@ -1421,11 +1423,15 @@ export default function AdminScreen() {
                         }}
                       >
                         <View style={[styles.userAvatarBox, (styles as any)[`userAvatar_${u.role}`]]}>
-                          <Ionicons
-                            name={u.role === 'admin' ? 'shield-checkmark-outline' : u.role === 'teacher' ? 'school-outline' : 'person-outline'}
-                            size={18}
-                            color={u.role === 'admin' ? '#4F46E5' : u.role === 'teacher' ? '#059669' : '#D97706'}
-                          />
+                          {u.avatar_url ? (
+                            <Image source={{ uri: u.avatar_url }} style={{ width: '100%', height: '100%', borderRadius: 9 }} />
+                          ) : (
+                            <Ionicons
+                              name={u.role === 'admin' ? 'shield-checkmark-outline' : u.role === 'teacher' ? 'school-outline' : 'person-outline'}
+                              size={18}
+                              color={u.role === 'admin' ? '#4F46E5' : u.role === 'teacher' ? '#059669' : '#D97706'}
+                            />
+                          )}
                         </View>
 
                         <View style={{ flex: 1 }}>
@@ -1900,6 +1906,11 @@ export default function AdminScreen() {
 
             {selectedUser && (
               <ScrollView showsVerticalScrollIndicator={false}>
+                {selectedUser.avatar_url && (
+                  <View style={{ alignItems: 'center', marginBottom: 16 }}>
+                    <Image source={{ uri: selectedUser.avatar_url }} style={{ width: 64, height: 64, borderRadius: 32, borderWidth: 2, borderColor: '#C7D2FE' }} />
+                  </View>
+                )}
                 {/* Basic Details */}
                 <View style={styles.detailRow}>
                   <Text style={styles.detailLabel}>Full Name</Text>

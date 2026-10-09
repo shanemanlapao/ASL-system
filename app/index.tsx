@@ -169,6 +169,20 @@ export default function LoginScreen() {
                 <Text style={styles.registerLink}>Sign Up</Text>
               </TouchableOpacity>
             </View>
+
+            {/* Legal compliance text */}
+            <TouchableOpacity
+              style={{ marginTop: 16, alignItems: "center" }}
+              onPress={() => router.push("/legal?tab=terms" as any)}
+              activeOpacity={0.7}
+            >
+              <Text style={{ fontSize: 12, color: "#64748B", textAlign: "center" }}>
+                By continuing, you agree to our{" "}
+                <Text style={{ color: "#7C3AED", fontWeight: "600", textDecorationLine: "underline" }}>
+                  Terms of Service & Privacy Policy
+                </Text>
+              </Text>
+            </TouchableOpacity>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

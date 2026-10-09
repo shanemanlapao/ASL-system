@@ -6,6 +6,7 @@ import { useLocalSearchParams, router } from "expo-router";
 import { useSubjects } from "../../context/SubjectsContext";
 import { useAuth } from "../../context/AuthContext";
 import { API_URL } from "../../context/config";
+import { COLORS } from "../../context/theme";
 import Confetti from "../../components/Confetti";
 import {
   cacheQuizSession,
@@ -782,7 +783,7 @@ export default function QuizScreen() {
           <Ionicons
             name={passed ? "trophy" : "refresh-circle"}
             size={80}
-            color={passed ? "#F59E0B" : "#0284C7"}
+            color={passed ? "#F59E0B" : COLORS.primary}
           />
 
           <Text style={styles.finishedTitle}>
@@ -832,16 +833,6 @@ export default function QuizScreen() {
             </View>
           )}
 
-          {/* Edge-Computed BKT Knowledge Mastery Telemetry */}
-          {bktMasteryResult && (
-            <View style={styles.bktMasteryBox}>
-              <Ionicons name="analytics-outline" size={16} color="#7C3AED" style={{ marginRight: 6 }} />
-              <Text style={styles.bktMasteryText}>
-                Mastery ({bktMasteryResult.display_name || bktMasteryResult.kc_name}): {Math.round(bktMasteryResult.p_mastery * 100)}% ({bktMasteryResult.status.toUpperCase()})
-              </Text>
-            </View>
-          )}
-
           {/* Celebration Unlocks */}
           {completionResult?.unlocked_medium && (
             <View style={styles.unlockCelebrationBox}>
@@ -863,24 +854,26 @@ export default function QuizScreen() {
           )}
 
           {submittingResults && (
-            <ActivityIndicator color="#0284C7" style={{ marginVertical: 10 }} />
+            <ActivityIndicator color={COLORS.primary} style={{ marginVertical: 10 }} />
           )}
 
           {/* Action Buttons */}
           <View style={styles.finishedActions}>
             <TouchableOpacity
               style={styles.retryBtn}
+              activeOpacity={0.8}
               onPress={() => {
                 setAttemptCount(prev => prev + 1);
                 startQuizSession();
               }}
             >
-              <Ionicons name="refresh" size={20} color="#0284C7" />
+              <Ionicons name="refresh" size={20} color={COLORS.primary} />
               <Text style={styles.retryBtnText}>Try Again (Fresh Questions)</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.doneBtn}
+              activeOpacity={0.85}
               onPress={() => router.back()}
             >
               <Text style={styles.doneBtnText}>Back to Lessons</Text>
@@ -1238,7 +1231,7 @@ export default function QuizScreen() {
 
       {/* Post-Submission Wrong Answer Scaffolding Modal */}
       <Modal
-        animationType="fade"
+        animationType="slide"
         transparent={true}
         visible={wrongFeedbackVisible}
         onRequestClose={handleDismissWrongFeedback}
@@ -1262,7 +1255,7 @@ export default function QuizScreen() {
                 </Text>
               </View>
               <TouchableOpacity onPress={handleDismissWrongFeedback} style={styles.reviewCloseBtn}>
-                <Ionicons name="close" size={22} color="#6B7280" />
+                <Ionicons name="close" size={22} color={COLORS.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1270,8 +1263,8 @@ export default function QuizScreen() {
             <View style={styles.reviewCardsRow}>
               {/* Selected Choice (Wrong) */}
               <View style={styles.reviewWrongBox}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                  <Ionicons name="close-circle" size={15} color="#EF4444" style={{ marginRight: 5 }} />
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 3 }}>
+                  <Ionicons name="close-circle" size={14} color="#EF4444" style={{ marginRight: 4 }} />
                   <Text style={styles.reviewWrongLabel}>Your Answer</Text>
                 </View>
                 <Text style={styles.reviewWrongText} numberOfLines={2}>
@@ -1281,8 +1274,8 @@ export default function QuizScreen() {
 
               {/* Correct Answer */}
               <View style={styles.reviewCorrectBox}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                  <Ionicons name="checkmark-circle" size={15} color="#10B981" style={{ marginRight: 5 }} />
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 3 }}>
+                  <Ionicons name="checkmark-circle" size={14} color="#10B981" style={{ marginRight: 4 }} />
                   <Text style={styles.reviewCorrectLabel}>Correct Answer</Text>
                 </View>
                 <Text style={styles.reviewCorrectText} numberOfLines={2}>
@@ -1291,33 +1284,36 @@ export default function QuizScreen() {
               </View>
             </View>
 
-            {/* Why it was wrong / Explanation */}
+            {/* Integrated Explanation + ASL Scaffold Card */}
             <View style={styles.reviewExplanationCard}>
               <Text style={styles.reviewExplanationLabel}>EXPLANATION</Text>
               <Text style={styles.reviewExplanationBody}>
                 {wrongFeedbackData?.reasonEn}
               </Text>
-            </View>
 
-            {/* ASL / Deaf English Scaffolding Box */}
-            {!!wrongFeedbackData?.reasonAsl && (
-              <View style={styles.reviewAslBox}>
-                <Text style={styles.reviewAslLabel}>ASL / DEAF ENGLISH SCAFFOLD</Text>
-                <Text style={styles.reviewAslBody}>
-                  {wrongFeedbackData?.reasonAsl}
-                </Text>
-              </View>
-            )}
+              {/* ASL / Deaf English Scaffolding Box */}
+              {!!wrongFeedbackData?.reasonAsl && (
+                <View style={styles.reviewAslBox}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
+                    <Ionicons name="hand-left" size={12} color={COLORS.primary} />
+                    <Text style={styles.reviewAslLabel}>ASL / DEAF ENGLISH</Text>
+                  </View>
+                  <Text style={styles.reviewAslBody}>
+                    {wrongFeedbackData?.reasonAsl}
+                  </Text>
+                </View>
+              )}
+            </View>
 
             {/* Continue Button */}
             <TouchableOpacity
               style={styles.reviewContinueBtn}
+              activeOpacity={0.85}
               onPress={handleDismissWrongFeedback}
             >
               <Text style={styles.reviewContinueBtnText}>Next Question</Text>
-              <Ionicons name="arrow-forward" size={18} color="white" />
+              <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
             </TouchableOpacity>
-            <Text style={styles.reviewTapAnywhereText}>Tap anywhere to continue</Text>
           </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
@@ -1326,18 +1322,35 @@ export default function QuizScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F8F9FA" },
+  safeArea: { flex: 1, backgroundColor: COLORS.background },
   centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 40, paddingBottom: 16, backgroundColor: '#F8F9FA' },
-  backButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#E0F2FE', justifyContent: 'center', alignItems: 'center', marginRight: 16 },
-  headerTitle: { fontSize: 18, fontWeight: 'bold', color: '#1F2937' },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? 12 : 8,
+    paddingBottom: 12,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 14,
+  },
+  headerTitle: { fontSize: 18, fontWeight: '700', color: COLORS.textPrimary },
   hintHeaderBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20,
-    backgroundColor: '#EDE9FE', borderWidth: 1, borderColor: '#7C3AED',
+    backgroundColor: COLORS.primaryLight, borderWidth: 1, borderColor: COLORS.primary,
   },
   hintHeaderBtnUsed: { backgroundColor: '#F3F4F6', borderColor: '#D1D5DB' },
-  hintHeaderBtnText: { fontSize: 13, fontWeight: '600', color: '#7C3AED' },
+  hintHeaderBtnText: { fontSize: 13, fontWeight: '600', color: COLORS.primary },
   hintHeaderBtnTextUsed: { color: '#9CA3AF' },
   hintBanner: {
     flexDirection: 'row', alignItems: 'flex-start',
@@ -1345,37 +1358,101 @@ const styles = StyleSheet.create({
     padding: 12, marginBottom: 14, borderWidth: 1, borderColor: '#FDE68A',
   },
   hintBannerText: { fontSize: 14, color: '#92400E', flex: 1, lineHeight: 20 },
-  scrollContent: { padding: 20 },
-  questionCard: { backgroundColor: 'white', borderRadius: 20, padding: 20, borderWidth: 1, borderColor: '#E5E7EB' },
-  questionText: { fontSize: 18, fontWeight: 'bold', color: '#1F2937', marginBottom: 16, lineHeight: 26 },
+  scrollContent: { padding: 16, paddingBottom: 32 },
+  questionCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    elevation: 2,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+  },
+  questionText: { fontSize: 18, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 16, lineHeight: 26 },
   questionImageWrapper: { width: '100%', alignItems: 'center', marginBottom: 16 },
-  questionImage: { width: '100%', height: 180, borderRadius: 12, marginBottom: 16 },
-  optionsContainer: { gap: 12 },
-  optionCard: { flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: '#F9FAFB' },
-  optionCorrect: { flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, borderWidth: 2, borderColor: '#10B981', backgroundColor: '#ECFDF5' },
-  optionWrong: { flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, borderWidth: 2, borderColor: '#EF4444', backgroundColor: '#FEF2F2' },
-  optionLetterBox: { width: 32, height: 32, borderRadius: 8, backgroundColor: '#E0F2FE', justifyContent: 'center', alignItems: 'center', marginRight: 12 },
-  optionLetter: { fontSize: 14, fontWeight: 'bold', color: '#0284C7' },
-  optionText: { fontSize: 16, color: '#374151', flex: 1 },
+  questionImage: { width: '100%', height: 180, borderRadius: 14, marginBottom: 16 },
+  optionsContainer: { gap: 10 },
+  optionCard: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 13,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.card,
+    elevation: 1,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.02,
+    shadowRadius: 4,
+  },
+  optionCorrect: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 13,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: COLORS.success,
+    backgroundColor: COLORS.successBg,
+  },
+  optionWrong: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 13,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: COLORS.error,
+    backgroundColor: COLORS.errorBg,
+  },
+  optionLetterBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: COLORS.primaryLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  optionLetter: { fontSize: 15, fontWeight: '700', color: COLORS.primary },
+  optionText: { fontSize: 16, color: COLORS.textPrimary, flex: 1, fontWeight: '500' },
   matchingContainer: { flexDirection: 'row', gap: 16 },
   matchingColumn: { flex: 1, gap: 10 },
-  matchingColHeader: { fontSize: 14, fontWeight: 'bold', color: '#4B5563', marginBottom: 4 },
-  matchingChip: { padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#D1D5DB', backgroundColor: '#F3F4F6', alignItems: 'center' },
-  matchingChipSelected: { borderColor: '#0284C7', backgroundColor: '#E0F2FE', borderWidth: 2 },
-  matchingChipMatched: { borderColor: '#10B981', backgroundColor: '#D1FAE5', opacity: 0.6 },
-  matchingChipText: { fontSize: 14, fontWeight: '600', color: '#374151' },
-  matchingChipTextMatched: { color: '#065F46' },
-  finishedContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
-  finishedTitle: { fontSize: 24, fontWeight: 'bold', color: '#1F2937', marginTop: 16 },
-  finishedScore: { fontSize: 20, color: '#0284C7', fontWeight: 'bold', marginTop: 8 },
-  difficultyBadge: { fontSize: 14, color: '#6B7280', marginTop: 4, textTransform: 'uppercase', fontWeight: '600' },
+  matchingColHeader: { fontSize: 14, fontWeight: '700', color: COLORS.textSecondary, marginBottom: 4 },
+  matchingChip: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, backgroundColor: '#F8FAFC', alignItems: 'center' },
+  matchingChipSelected: { borderColor: COLORS.primary, backgroundColor: COLORS.primaryLight, borderWidth: 2 },
+  matchingChipMatched: { borderColor: COLORS.success, backgroundColor: COLORS.successBg, opacity: 0.6 },
+  matchingChipText: { fontSize: 14, fontWeight: '600', color: COLORS.textPrimary },
+  matchingChipTextMatched: { color: COLORS.success },
+  finishedContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  finishedTitle: { fontSize: 24, fontWeight: '700', color: COLORS.textPrimary, marginTop: 16 },
+  finishedScore: { fontSize: 22, color: COLORS.primary, fontWeight: '700', marginTop: 8 },
+  difficultyBadge: { fontSize: 13, color: COLORS.textSecondary, marginTop: 4, textTransform: 'uppercase', fontWeight: '700' },
   unlockCelebrationBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF08A', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, marginTop: 14 },
-  unlockCelebrationText: { color: '#854D0E', fontWeight: 'bold', fontSize: 15 },
-  finishedActions: { width: '100%', gap: 12, marginTop: 30 },
-  retryBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 12, borderWidth: 2, borderColor: '#0284C7', backgroundColor: 'white' },
-  retryBtnText: { color: '#0284C7', fontWeight: 'bold', fontSize: 16 },
-  doneBtn: { backgroundColor: '#0284C7', paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
-  doneBtnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  unlockCelebrationText: { color: '#854D0E', fontWeight: '700', fontSize: 15 },
+  finishedActions: { width: '100%', gap: 10, marginTop: 28 },
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.card,
+  },
+  retryBtnText: { color: COLORS.primary, fontWeight: '700', fontSize: 16 },
+  doneBtn: { backgroundColor: COLORS.primary, paddingVertical: 15, borderRadius: 14, alignItems: 'center', elevation: 3 },
+  doneBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 16 },
   aslFloatBtn: {
     position: 'absolute', bottom: 100, right: 16,
     backgroundColor: '#7C3AED', borderRadius: 24,
@@ -1629,11 +1706,17 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   reviewModalContent: {
-    backgroundColor: 'white',
+    backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    padding: 22,
+    padding: 20,
+    paddingBottom: 28,
     maxHeight: '85%',
+    elevation: 8,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: -3 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
   },
   reviewModalHeader: {
     flexDirection: 'row',
@@ -1647,9 +1730,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   reviewHeaderTitle: {
-    fontSize: 17,
+    fontSize: 16.5,
     fontWeight: '700',
-    color: '#1F2937',
+    color: COLORS.textPrimary,
   },
   reviewCloseBtn: {
     padding: 4,
@@ -1662,7 +1745,7 @@ const styles = StyleSheet.create({
   reviewWrongBox: {
     flex: 1,
     backgroundColor: '#FEF2F2',
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: '#FCA5A5',
     borderRadius: 12,
     padding: 10,
@@ -1671,19 +1754,19 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#DC2626',
-    marginLeft: 4,
+    marginLeft: 2,
   },
   reviewWrongText: {
     fontSize: 13,
     fontWeight: '600',
     color: '#991B1B',
     textDecorationLine: 'line-through',
-    marginTop: 2,
+    marginTop: 3,
   },
   reviewCorrectBox: {
     flex: 1,
     backgroundColor: '#F0FDF4',
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: '#86EFAC',
     borderRadius: 12,
     padding: 10,
@@ -1692,76 +1775,73 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#16A34A',
-    marginLeft: 4,
+    marginLeft: 2,
   },
   reviewCorrectText: {
     fontSize: 13,
     fontWeight: '700',
     color: '#166534',
-    marginTop: 2,
+    marginTop: 3,
   },
   reviewExplanationCard: {
     backgroundColor: '#F8FAFC',
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    padding: 12,
-    marginBottom: 10,
+    borderColor: COLORS.border,
+    padding: 13,
+    marginBottom: 16,
   },
   reviewExplanationLabel: {
-    fontSize: 10,
+    fontSize: 10.5,
     fontWeight: '700',
-    color: '#64748B',
+    color: COLORS.textSecondary,
     letterSpacing: 0.5,
     marginBottom: 4,
   },
   reviewExplanationBody: {
-    fontSize: 13,
-    color: '#334155',
-    lineHeight: 19,
+    fontSize: 13.5,
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+    fontWeight: '500',
   },
   reviewAslBox: {
-    backgroundColor: '#EDE9FE',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 16,
+    backgroundColor: COLORS.primaryLight,
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: COLORS.primaryBorder,
   },
   reviewAslLabel: {
-    fontSize: 10,
+    fontSize: 10.5,
     fontWeight: '700',
-    color: '#7C3AED',
+    color: COLORS.primary,
     letterSpacing: 0.5,
-    marginBottom: 4,
   },
   reviewAslBody: {
-    fontSize: 12,
+    fontSize: 12.5,
     fontWeight: '700',
-    color: '#4C1D95',
+    color: COLORS.primaryDark,
     lineHeight: 18,
-    letterSpacing: 0.3,
+    letterSpacing: 0.2,
   },
   reviewContinueBtn: {
-    backgroundColor: '#7C3AED',
-    borderRadius: 12,
-    paddingVertical: 14,
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+    height: 50,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    shadowColor: '#7C3AED',
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 4,
+    elevation: 3,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
   },
   reviewContinueBtnText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
-  },
-  reviewTapAnywhereText: {
-    textAlign: 'center',
-    fontSize: 11,
-    color: '#9CA3AF',
-    marginTop: 8,
   },
 });
