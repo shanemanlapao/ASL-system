@@ -268,8 +268,17 @@ export default function RegisterScreen() {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: "#F8F9FA" },
   container: { flex: 1 },
-  scrollContent: { flexGrow: 1, justifyContent: "center", padding: 20 },
-  headerContainer: { alignItems: "center", marginBottom: 24 },
+  scrollContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+    padding: 20,
+    ...(Platform.OS === "web" ? { alignItems: "center" } : {}),
+  },
+  headerContainer: {
+    alignItems: "center",
+    marginBottom: 24,
+    ...(Platform.OS === "web" ? { width: "100%", maxWidth: 460, alignSelf: "center" } : {}),
+  },
   logoContainer: {
     width: 80, height: 80, backgroundColor: "#FF8A65",
     borderRadius: 20, justifyContent: "center", alignItems: "center", marginBottom: 20,
@@ -280,12 +289,14 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", backgroundColor: "#FEF2F2",
     borderWidth: 1, borderColor: "#FECACA", borderRadius: 12,
     paddingHorizontal: 14, paddingVertical: 10, marginBottom: 16, gap: 8,
+    ...(Platform.OS === "web" ? { width: "100%", maxWidth: 460, alignSelf: "center" } : {}),
   },
   errorBannerText: { color: "#EF4444", fontSize: 13, flex: 1 },
   card: {
     backgroundColor: "white", borderRadius: 24, padding: 24,
     shadowColor: "#000", shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05, shadowRadius: 15, elevation: 3,
+    ...(Platform.OS === "web" ? { width: "100%", maxWidth: 460, alignSelf: "center" } : {}),
   },
   cardTitle: { fontSize: 20, fontWeight: "600", color: "#1F2937", marginBottom: 20 },
   inputGroup: { marginBottom: 14 },
@@ -297,7 +308,12 @@ const styles = StyleSheet.create({
   inputError: { borderColor: "#EF4444" },
   inputSuccess: { borderColor: "#10B981" },
   inputIcon: { marginRight: 12 },
-  input: { flex: 1, fontSize: 14, color: "#1F2937" },
+  input: {
+    flex: 1,
+    fontSize: 14,
+    color: "#1F2937",
+    ...(Platform.OS === "web" ? ({ outlineStyle: "none" } as any) : {}),
+  },
   fieldError: { color: "#EF4444", fontSize: 12, marginTop: 4, marginLeft: 4 },
   registerButton: {
     backgroundColor: "#FF8A65", borderRadius: 12, height: 50,
@@ -307,5 +323,5 @@ const styles = StyleSheet.create({
   registerButtonText: { color: "white", fontSize: 16, fontWeight: "600" },
   loginRow: { flexDirection: "row", justifyContent: "center", alignItems: "center" },
   loginText: { fontSize: 14, color: "#6B7280" },
-  loginLink: { fontSize: 14, color: "#12B3C9", fontWeight: "600" },
+  loginLink: { fontSize: 14, color: "#7C3AED", fontWeight: "700" },
 });

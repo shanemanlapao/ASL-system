@@ -1,6 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -10,9 +9,11 @@ import {
   Platform,
   Image,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
+import PermissionModal from '../../components/PermissionModal';
 import { useSubjects } from '../../context/SubjectsContext';
 import { API_URL } from '../../context/config';
 import { COLORS } from '../../context/theme';
@@ -186,7 +187,8 @@ export default function HomeScreen() {
   const topics = englishSubject?.categories[0]?.topics ?? [];
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <PermissionModal />
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
 
         {/* 1. Sleek Compact Header + Stat Badges in a Single Row */}

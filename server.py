@@ -4,7 +4,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
+try:
+    from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
+except ImportError:
+    MBart50TokenizerFast = None
+    MBartForConditionalGeneration = None
 from passlib.context import CryptContext
 import psycopg2
 import psycopg2.extras
@@ -186,8 +190,7 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
     # Tier 3: Anti-Cheat Quiz Submissions (1 req / 15s)
     elif (path.startswith("/quiz/session/") and path.endswith("/complete")) or \
          path == "/quiz/offline-sync" or \
-         "/daily-quizzes/" in path or \
-         "/repair-streak" in path:
+         (method == "POST" and ("/daily-quizzes/" in path or "/repair-streak" in path or "/daily-missions/claim" in path)):
         max_req = 1
         window = 15
         key = f"anticheat_{client_ip}_{path}"
@@ -237,13 +240,42 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
 
 # ── Database connection ───────────────────────────────────────────────────────
 def get_db():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        database=os.getenv("DB_NAME", "postgres"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "bokeeer03"),
-        port=int(os.getenv("DB_PORT", "5432")),
-    )
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return psycopg2.connect(
+            database_url,
+            connect_timeout=int(os.getenv("DB_TIMEOUT", "10")),
+            sslmode=os.getenv("DB_SSLMODE", "require")
+        )
+
+    host = os.getenv("DB_HOST", "localhost")
+    port = int(os.getenv("DB_PORT", "5432"))
+    sslmode = os.getenv("DB_SSLMODE", "require" if host not in ["localhost", "127.0.0.1"] else "prefer")
+
+    # If remote host, resolve IPv4 to prevent IPv6 DNS timeout on networks without IPv6 routes
+    hostaddr = None
+    if host not in ["localhost", "127.0.0.1"]:
+        try:
+            import socket
+            res = socket.getaddrinfo(host, port, socket.AF_INET)
+            if res:
+                hostaddr = res[0][4][0]
+        except Exception:
+            hostaddr = None
+
+    conn_args = {
+        "host": host,
+        "database": os.getenv("DB_NAME", "postgres"),
+        "user": os.getenv("DB_USER", "postgres"),
+        "password": os.getenv("DB_PASSWORD", "bokeeer03"),
+        "port": port,
+        "connect_timeout": int(os.getenv("DB_TIMEOUT", "10")),
+        "sslmode": sslmode,
+    }
+    if hostaddr:
+        conn_args["hostaddr"] = hostaddr
+
+    return psycopg2.connect(**conn_args)
 
 # ── Database init — Milestone 1 ───────────────────────────────────────────────
 def init_db():
@@ -417,6 +449,17 @@ def init_db():
                 stars_earned INTEGER DEFAULT 0,
                 UNIQUE(user_id, slot_date, slot_difficulty)
             );
+
+            CREATE TABLE IF NOT EXISTS student_daily_missions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                mission_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                mission_id VARCHAR(50) NOT NULL,
+                claimed BOOLEAN DEFAULT TRUE,
+                stars_earned INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, mission_date, mission_id)
+            );
         """)
 
         # ── User Roles & Plain Passwords ──────────────────────────────────────
@@ -495,7 +538,8 @@ def init_db():
     except Exception as e:
         print("Database init error:", e)
 
-init_db()
+# Launch database init in background so web server starts immediately
+threading.Thread(target=init_db, daemon=True).start()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Phase 3: Streak Helper ────────────────────────────────────────────────────
@@ -580,6 +624,25 @@ def _deduct_stars(cur, user_id: int, amount: int, topic_id: str = None):
             "UPDATE student_profiles SET total_stars = GREATEST(0, total_stars - %s) WHERE user_id = %s AND id = (SELECT id FROM student_profiles WHERE user_id = %s LIMIT 1)",
             (amount, user_id, user_id)
         )
+
+
+def _add_stars(cur, user_id: int, amount: int, topic_id: str = "general"):
+    """
+    Permanently add stars to student's profile in database.
+    Finds existing topic profile or creates/updates fallback topic profile.
+    """
+    if amount <= 0:
+        return
+    cur.execute("SELECT topic_id FROM student_profiles WHERE user_id = %s ORDER BY total_stars DESC LIMIT 1", (user_id,))
+    existing = cur.fetchone()
+    target_topic = existing["topic_id"] if existing else (topic_id or "general")
+    cur.execute(
+        """INSERT INTO student_profiles (user_id, topic_id, total_stars)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (user_id, topic_id)
+           DO UPDATE SET total_stars = student_profiles.total_stars + %s""",
+        (user_id, target_topic, amount, amount)
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -682,18 +745,132 @@ def _upsert_kc_mastery(cur, user_id: int, kc_name: str, is_correct: bool):
         )
     )
 
-# ── Load model from local cache (already downloaded) ─────────────────────────
+tokenizer = None
+model = None
+model_loading = False
+
 LOCAL_MODEL_PATH = r"C:\Users\Radny\.cache\huggingface\hub\models--manohonsy--asl-mbart-50-lora\snapshots\d1cd3a2abdad5b6df6438be5b0a2ed388c622e9e"
-print("Loading tokenizer and model from local cache...")
-tokenizer = MBart50TokenizerFast.from_pretrained(LOCAL_MODEL_PATH, local_files_only=True)
-model = MBartForConditionalGeneration.from_pretrained(LOCAL_MODEL_PATH, local_files_only=True)
+MODEL_REPO = "manohonsy/asl-mbart-50-lora"
 
-# Manually register asl_GL in case it isn't present
-asl_id = tokenizer.convert_tokens_to_ids("asl_GL")
-tokenizer.lang_code_to_id["asl_GL"] = asl_id
+def _load_mbart_model():
+    global tokenizer, model, model_loading
+    if not MBart50TokenizerFast or not MBartForConditionalGeneration:
+        print("Transformers not available. Running with linguistic ASL engine.")
+        return
+    model_loading = True
+    try:
+        source_path = LOCAL_MODEL_PATH if os.path.exists(LOCAL_MODEL_PATH) else MODEL_REPO
+        print(f"Loading mBART-50 ASL model from: {source_path}...")
+        tok = MBart50TokenizerFast.from_pretrained(source_path)
+        try:
+            import torch
+            mod = MBartForConditionalGeneration.from_pretrained(source_path, torch_dtype=torch.float16)
+        except Exception:
+            mod = MBartForConditionalGeneration.from_pretrained(source_path)
+        asl_id = tok.convert_tokens_to_ids("asl_GL")
+        tok.lang_code_to_id["asl_GL"] = asl_id
+        tokenizer = tok
+        model = mod
+        print("mBART-50 ASL model successfully loaded and ready for neural inference!")
+    except Exception as e:
+        print(f"Warning: Could not load mBART model ({e}). Using linguistic ASL engine.")
+    finally:
+        model_loading = False
 
-print(f"asl_GL token id: {asl_id}")
-print("Model loaded and ready!")
+# Start loading in background thread so server boots up in <1 second
+threading.Thread(target=_load_mbart_model, daemon=True).start()
+
+def rule_based_asl_gloss(text: str) -> str:
+    """
+    Linguistic ASL Gloss Grammar Engine:
+    - Time-First positioning (BEGINNING, YESTERDAY, TOMORROW, NOW)
+    - Interrogatives (WH-words) moved to sentence end ('Who are you?' -> 'YOU WHO?')
+    - Strips copulas (is, am, are, was, were, be, been)
+    - Strips articles (a, an, the)
+    - Strips auxiliary do/does/did in questions
+    - Pronoun and idiom normalization
+    """
+    clean_text = text.strip()
+    if not clean_text:
+        return ""
+
+    is_question = clean_text.endswith("?")
+    text_no_punct = re.sub(r'[?!.,;:]', '', clean_text).lower()
+    words = text_no_punct.split()
+
+    phrase_map = {
+        "thank you": "THANK-YOU",
+        "thanks": "THANK-YOU",
+        "you are welcome": "WELCOME",
+        "good morning": "MORNING GOOD",
+        "good afternoon": "AFTERNOON GOOD",
+        "good night": "NIGHT GOOD",
+        "how are you": "HOW YOU?",
+        "my name is": "MY NAME",
+        "what is your name": "YOUR NAME WHAT?",
+        "who are you": "YOU WHO?",
+        "where are you": "YOU WHERE?",
+        "i don't know": "ME DON'T-KNOW",
+        "i do not know": "ME DON'T-KNOW",
+        "see you later": "SEE LATER",
+    }
+    lowered_full = text_no_punct.strip()
+    if lowered_full in phrase_map:
+        return phrase_map[lowered_full]
+
+    time_words = {"yesterday", "tomorrow", "today", "now", "past", "future", "morning", "night", "afternoon", "beginning"}
+    found_time = []
+    filtered_words = []
+
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w in ("at", "in") and i + 2 < len(words) and words[i+1] == "the" and words[i+2] in time_words:
+            found_time.append(words[i+2].upper())
+            i += 3
+        elif w in time_words:
+            found_time.append(w.upper())
+            i += 1
+        else:
+            filtered_words.append(w)
+            i += 1
+
+    wh_words = {"who", "what", "where", "when", "why", "how", "which"}
+    found_wh = []
+    content_words = []
+
+    for w in filtered_words:
+        if w in wh_words:
+            found_wh.append(w.upper())
+        elif w in {"is", "am", "are", "was", "were", "be", "been", "being"}:
+            continue
+        elif w in {"a", "an", "the"}:
+            continue
+        elif w in {"do", "does", "did"} and (is_question or found_wh):
+            continue
+        else:
+            if w in {"i", "me"}:
+                content_words.append("ME")
+            elif w in {"my", "mine"}:
+                content_words.append("MY")
+            elif w in {"your", "yours"}:
+                content_words.append("YOUR")
+            else:
+                content_words.append(w.upper())
+
+    ordered = []
+    if found_time:
+        ordered.extend(found_time)
+    if content_words:
+        ordered.extend(content_words)
+    if found_wh:
+        ordered.extend(found_wh)
+
+    result_str = " ".join(ordered)
+    if (is_question or found_wh) and not result_str.endswith("?"):
+        result_str += "?"
+
+    return result_str if result_str else clean_text.upper()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2726,7 +2903,7 @@ def fit_bkt_model(topic_id: Optional[str] = None):
 
 @app.get("/student/{user_id}/streak")
 def get_streak(user_id: int):
-    """Returns current streak, longest streak, repair eligibility and total stars."""
+    """Returns current streak, longest streak, burnout status, repair eligibility and total stars."""
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -2741,17 +2918,37 @@ def get_streak(user_id: int):
                 "user_id": user_id, "current_streak": 0, "longest_streak": 0,
                 "last_activity_date": None, "can_repair": False,
                 "repair_cost": 30, "pre_break_streak": 0, "total_stars": total_stars,
-                "active_today": False,
+                "active_today": False, "streak_broken": False,
             }
-        can_repair = (row["pre_break_streak"] > 0 and row["current_streak"] <= 1 and total_stars >= 30)
-        active_today = row["last_activity_date"] == today
+        
+        last = row["last_activity_date"]
+        current = row["current_streak"] or 0
+        pre_break = row["pre_break_streak"] or 0
+        active_today = (last == today)
+        
+        # Burnout detection:
+        # A streak is broken if pre_break_streak > 0, OR if last activity was strictly before yesterday and current > 0
+        is_broken = False
+        broken_amount = pre_break
+        if pre_break > 0:
+            is_broken = True
+        elif last and last < (today - timedelta(days=1)) and current > 0:
+            is_broken = True
+            broken_amount = current
+            
+        can_repair = is_broken and broken_amount > 0 and total_stars >= 30
+
         return {
-            "user_id": user_id, "current_streak": row["current_streak"],
-            "longest_streak": row["longest_streak"],
-            "last_activity_date": str(row["last_activity_date"]) if row["last_activity_date"] else None,
-            "pre_break_streak": row["pre_break_streak"],
-            "can_repair": can_repair, "repair_cost": 30,
-            "total_stars": total_stars, "active_today": active_today,
+            "user_id": user_id,
+            "current_streak": current,
+            "longest_streak": row["longest_streak"] or 0,
+            "last_activity_date": str(last) if last else None,
+            "pre_break_streak": broken_amount,
+            "can_repair": can_repair,
+            "streak_broken": is_broken,
+            "repair_cost": 30,
+            "total_stars": total_stars,
+            "active_today": active_today,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2765,16 +2962,34 @@ def repair_streak(user_id: int):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM student_streaks WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
-        if not row or row["pre_break_streak"] == 0:
+        today = date.today()
+        if not row:
             raise HTTPException(status_code=400, detail="No streak to repair.")
+        
+        pre_break = row["pre_break_streak"] or 0
+        current = row["current_streak"] or 0
+        last = row["last_activity_date"]
+
+        restored = 0
+        if pre_break > 0:
+            restored = pre_break
+        elif last and last < (today - timedelta(days=1)) and current > 0:
+            restored = current
+
+        if restored <= 0:
+            raise HTTPException(status_code=400, detail="No broken streak to repair.")
+
         total_stars = _get_total_stars(cur, user_id)
         if total_stars < 30:
             raise HTTPException(status_code=400, detail="Not enough stars. Need 30 stars to repair streak.")
+
         _deduct_stars(cur, user_id, 30)
-        restored = row["pre_break_streak"]
+        # Restore current streak and set last_activity_date to yesterday so next quiz today can increment it!
         cur.execute(
-            "UPDATE student_streaks SET current_streak = %s, pre_break_streak = 0, updated_at = NOW() WHERE user_id = %s",
-            (restored, user_id)
+            """UPDATE student_streaks
+               SET current_streak = %s, pre_break_streak = 0, last_activity_date = %s, updated_at = NOW()
+               WHERE user_id = %s""",
+            (restored, today - timedelta(days=1), user_id)
         )
         conn.commit()
         cur.close()
@@ -2782,6 +2997,92 @@ def repair_streak(user_id: int):
         return {"success": True, "restored_streak": restored, "stars_spent": 30}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Daily Missions Persistent Endpoints ────────────────────────────────────────
+
+class MissionClaimRequest(BaseModel):
+    mission_id: str
+    stars_reward: int = 10
+
+@app.get("/student/{user_id}/daily-missions")
+def get_daily_missions(user_id: int):
+    """Returns today's claimed daily missions for the student."""
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        today = date.today()
+        cur.execute(
+            "SELECT mission_id, claimed, stars_earned FROM student_daily_missions WHERE user_id = %s AND mission_date = %s",
+            (user_id, today)
+        )
+        rows = cur.fetchall()
+        total_stars = _get_total_stars(cur, user_id)
+        cur.close()
+        conn.close()
+        claimed = {r["mission_id"]: True for r in rows if r["claimed"]}
+        return {
+            "user_id": user_id,
+            "date": str(today),
+            "claimed_missions": claimed,
+            "total_stars": total_stars
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/student/{user_id}/daily-missions/claim")
+def claim_daily_mission(user_id: int, req: MissionClaimRequest):
+    """Claims a daily mission, persists it to DB, and permanently awards stars to student profile."""
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        today = date.today()
+        
+        # Check if already claimed today
+        cur.execute(
+            "SELECT * FROM student_daily_missions WHERE user_id = %s AND mission_date = %s AND mission_id = %s",
+            (user_id, today, req.mission_id)
+        )
+        existing = cur.fetchone()
+        if existing and existing["claimed"]:
+            total_stars = _get_total_stars(cur, user_id)
+            cur.close()
+            conn.close()
+            return {
+                "success": True,
+                "already_claimed": True,
+                "mission_id": req.mission_id,
+                "stars_earned": existing["stars_earned"],
+                "total_stars": total_stars,
+                "message": "Mission already claimed today."
+            }
+
+        # Insert mission claim
+        cur.execute(
+            """INSERT INTO student_daily_missions (user_id, mission_date, mission_id, claimed, stars_earned)
+               VALUES (%s, %s, %s, TRUE, %s)
+               ON CONFLICT (user_id, mission_date, mission_id)
+               DO UPDATE SET claimed = TRUE, stars_earned = EXCLUDED.stars_earned""",
+            (user_id, today, req.mission_id, req.stars_reward)
+        )
+
+        # Permanently award stars into student_profiles
+        _add_stars(cur, user_id, req.stars_reward)
+        
+        conn.commit()
+        total_stars = _get_total_stars(cur, user_id)
+        cur.close()
+        conn.close()
+
+        return {
+            "success": True,
+            "mission_id": req.mission_id,
+            "stars_reward": req.stars_reward,
+            "total_stars": total_stars
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3208,11 +3509,8 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
             "UPDATE daily_quiz_slots SET completed = TRUE, stars_earned = %s WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
             (slot_stars, user_id, today, req.slot_difficulty)
         )
-        if slot_stars > 0 and req.topic_id:
-            cur.execute(
-                "INSERT INTO student_profiles (user_id, topic_id, total_stars) VALUES (%s, %s, %s) ON CONFLICT (user_id, topic_id) DO UPDATE SET total_stars = student_profiles.total_stars + %s",
-                (user_id, req.topic_id, slot_stars, slot_stars)
-            )
+        if slot_stars > 0:
+            _add_stars(cur, user_id, slot_stars, req.topic_id or "general")
         _update_student_streak(cur, user_id)
         cur.execute(
             "SELECT COUNT(*) AS cnt FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND completed = TRUE",
@@ -3222,11 +3520,7 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
         bonus_awarded = False
         if completed_count == 3:
             bonus_awarded = True
-            if req.topic_id:
-                cur.execute(
-                    "INSERT INTO student_profiles (user_id, topic_id, total_stars) VALUES (%s, %s, %s) ON CONFLICT (user_id, topic_id) DO UPDATE SET total_stars = student_profiles.total_stars + %s",
-                    (user_id, req.topic_id, DAILY_FULL_CLEAR_BONUS, DAILY_FULL_CLEAR_BONUS)
-                )
+            _add_stars(cur, user_id, DAILY_FULL_CLEAR_BONUS, req.topic_id or "general")
         conn.commit()
         cur.close()
         conn.close()
@@ -3249,6 +3543,10 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
 
 @app.post("/translate")
 def translate_text(request: TranslationRequest):
+    if not tokenizer or not model:
+        text_res = rule_based_asl_gloss(request.text) if request.direction == "en_to_asl" else request.text.capitalize()
+        return {"result": text_res, "direction": request.direction, "fallback": True}
+
     if request.direction == "en_to_asl":
         tokenizer.src_lang = "en_XX"
         inputs = tokenizer(
@@ -4437,5 +4735,9 @@ def get_teacher_history():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Serve Web Portal (Teacher & Admin) at Root ─────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
-
+if os.path.exists("dist"):
+    app.mount("/", StaticFiles(directory="dist", html=True), name="web-portal")

@@ -1,6 +1,8 @@
 import { ActivityIndicator, View } from "react-native";
 import { Stack, router } from "expo-router";
 import { useEffect } from "react";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { StatusBar } from "expo-status-bar";
 import { SubjectsProvider } from "../context/SubjectsContext";
 import { AuthProvider, useAuth } from "../context/AuthContext";
 
@@ -57,10 +59,13 @@ function RootLayoutContent() {
 
 export default function RootLayout() {
   return (
-    <AuthProvider>
-      <SubjectsProvider>
-        <RootLayoutContent />
-      </SubjectsProvider>
-    </AuthProvider>
+    <SafeAreaProvider>
+      <StatusBar style="dark" backgroundColor="transparent" translucent />
+      <AuthProvider>
+        <SubjectsProvider>
+          <RootLayoutContent />
+        </SubjectsProvider>
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }

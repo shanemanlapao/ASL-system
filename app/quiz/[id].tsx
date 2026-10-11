@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity, ActivityIndicator, Image, Dimensions, Modal, Alert, Animated, Platform } from "react-native";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Image, Dimensions, Modal, Alert, Animated, Platform } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, router } from "expo-router";
@@ -34,7 +35,7 @@ interface QuestionAnswerRecord {
 }
 
 export default function QuizScreen() {
-  const { id, subjectId, deafEnglish, lessonId, quizId: paramQuizId, difficulty: paramDiff } = useLocalSearchParams();
+  const { id, subjectId, deafEnglish, lessonId, quizId: paramQuizId, difficulty: paramDiff, mode, slot_difficulty } = useLocalSearchParams<{ id?: string; subjectId?: string; deafEnglish?: string; lessonId?: string; quizId?: string; difficulty?: string; mode?: string; slot_difficulty?: string }>();
   const { subjects } = useSubjects();
   const { user } = useAuth();
   const userId = user?.id || 1;
@@ -512,6 +513,27 @@ export default function QuizScreen() {
           if (latestKCMastery) {
             setBktMasteryResult(latestKCMastery);
           }
+
+          // If mode is daily quiz, mark slot complete and earn daily stars & streak
+          if (mode === 'daily') {
+            try {
+              const diff = (slot_difficulty as string) || (difficulty as string) || 'easy';
+              await fetch(`${API_URL}/daily-quizzes/${userId}/complete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  slot_difficulty: diff,
+                  score: finalScore,
+                  total_questions: totalQ,
+                  time_spent_seconds: totalTimeSec,
+                  topic_id: (subjectId as string) || null,
+                }),
+              });
+            } catch (dErr) {
+              console.log('Daily slot complete error:', dErr);
+            }
+          }
+
           return;
         }
       }
@@ -741,7 +763,7 @@ export default function QuizScreen() {
   // Locked Quiz Screen
   if (lockedError) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
         <View style={styles.header}>
           <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color="#0284C7" />
@@ -777,7 +799,7 @@ export default function QuizScreen() {
     const earnedStars = completionResult?.stars_earned !== undefined ? completionResult.stars_earned : calculatedStars;
 
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
         {passed && <Confetti count={65} />}
         <View style={styles.finishedContainer}>
           <Ionicons
@@ -886,7 +908,7 @@ export default function QuizScreen() {
 
   if (!currentQuestion) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
         <View style={styles.centerContainer}>
           <Text style={{ color: "#EF4444", fontSize: 16 }}>No questions available for this quiz.</Text>
           <TouchableOpacity style={[styles.doneButton, { marginTop: 16 }]} onPress={() => router.back()}>
@@ -903,7 +925,7 @@ export default function QuizScreen() {
   const progressPercent = totalQuestions > 0 ? (currentQuestionNumber / totalQuestions) * 100 : 0;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>

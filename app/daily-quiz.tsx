@@ -4,12 +4,12 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  SafeAreaView,
   TouchableOpacity,
   ActivityIndicator,
   Platform,
   Animated,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../context/AuthContext';
@@ -66,6 +66,29 @@ export default function DailyQuizScreen() {
   const [loading, setLoading] = useState(true);
   const [repairingStreak, setRepairingStreak] = useState(false);
   const [refreshingSlot, setRefreshingSlot] = useState<string | null>(null);
+  const [timeUntilMidnight, setTimeUntilMidnight] = useState<string>('');
+
+  useEffect(() => {
+    const updateCountdown = () => {
+      const now = new Date();
+      const midnight = new Date();
+      midnight.setHours(24, 0, 0, 0);
+      const diffMs = midnight.getTime() - now.getTime();
+      if (diffMs <= 0) {
+        setTimeUntilMidnight('00:00:00');
+        return;
+      }
+      const h = Math.floor(diffMs / (1000 * 60 * 60));
+      const m = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+      const s = Math.floor((diffMs % (1000 * 60)) / 1000);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      setTimeUntilMidnight(`${pad(h)}:${pad(m)}:${pad(s)}`);
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Subtle Flame Flicker / Pulse for active study streak
   const flameAnim = useRef(new Animated.Value(1)).current;
@@ -181,7 +204,7 @@ export default function DailyQuizScreen() {
   // -- Render -----------------------------------------------------------------
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={styles.safe} edges={['top']}>
       {fullClear && <Confetti count={50} />}
       {/* Header */}
       <View style={styles.header}>
@@ -257,7 +280,16 @@ export default function DailyQuizScreen() {
           )}
 
           {/* Slot Cards */}
-          <Text style={styles.sectionTitle}>Today's Challenges</Text>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Today's Challenges</Text>
+            <View style={styles.resetHeaderGroup}>
+              <View style={styles.resetTimerBadge}>
+                <Ionicons name="time-outline" size={12} color="#7C3AED" style={{ marginRight: 4 }} />
+                <Text style={styles.resetTimerText}>{timeUntilMidnight}</Text>
+              </View>
+              <Text style={styles.sectionBadge}>Resets 12 AM</Text>
+            </View>
+          </View>
 
           {slots.length === 0 ? (
             <View style={styles.emptyState}>
@@ -493,12 +525,46 @@ const styles = StyleSheet.create({
     color: '#92400E',
     lineHeight: 20,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: '#4C1D95',
-    marginBottom: 12,
     letterSpacing: 0.2,
+  },
+  resetHeaderGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  resetTimerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EDE9FE',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#DDD6FE',
+  },
+  resetTimerText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#7C3AED',
+  },
+  sectionBadge: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#7C3AED',
+    backgroundColor: '#F3E8FF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
   },
   slotCard: {
     backgroundColor: '#fff',

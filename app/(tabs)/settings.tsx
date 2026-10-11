@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  SafeAreaView,
   TouchableOpacity,
   Alert,
   Platform,
@@ -14,6 +13,7 @@ import {
   Switch,
   Image,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -178,18 +178,12 @@ export default function SettingsScreen() {
       const asset = result.assets[0];
       setUploadingAvatar(true);
 
+      const fetchRes = await fetch(asset.uri);
+      const blob = await fetchRes.blob();
+      const filename = asset.fileName || asset.uri.split("/").pop() || "avatar.jpg";
+
       const formData = new FormData();
-      if (Platform.OS === "web") {
-        const fetchRes = await fetch(asset.uri);
-        const blob = await fetchRes.blob();
-        formData.append("file", blob, "avatar.jpg");
-      } else {
-        const uri = asset.uri;
-        const filename = uri.split("/").pop() || "avatar.jpg";
-        const match = /\.(\w+)$/.exec(filename);
-        const type = match ? `image/${match[1]}` : `image/jpeg`;
-        formData.append("file", { uri, name: filename, type } as any);
-      }
+      formData.append("file", blob, filename);
 
       const res = await fetch(`${API_URL}/student/${userId}/upload-avatar`, {
         method: "POST",
@@ -346,7 +340,7 @@ export default function SettingsScreen() {
   const isCooldownActive = avatarStatus && !avatarStatus.can_change;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
       <ScrollView
         contentContainerStyle={styles.container}
         showsVerticalScrollIndicator={false}

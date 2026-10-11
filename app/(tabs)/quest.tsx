@@ -65,15 +65,41 @@ export default function QuestTabScreen() {
   const [loading, setLoading] = useState<boolean>(true);
   const [repairingStreak, setRepairingStreak] = useState<boolean>(false);
   const [claimedMissions, setClaimedMissions] = useState<Record<string, boolean>>({});
+  const [claimingMission, setClaimingMission] = useState<string | null>(null);
+  const [timeUntilMidnight, setTimeUntilMidnight] = useState<string>('');
+
+  // 12 Midnight countdown timer
+  useEffect(() => {
+    const updateCountdown = () => {
+      const now = new Date();
+      const midnight = new Date();
+      midnight.setHours(24, 0, 0, 0);
+      const diffMs = midnight.getTime() - now.getTime();
+      if (diffMs <= 0) {
+        setTimeUntilMidnight('00:00:00');
+        return;
+      }
+      const h = Math.floor(diffMs / (1000 * 60 * 60));
+      const m = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+      const s = Math.floor((diffMs % (1000 * 60)) / 1000);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      setTimeUntilMidnight(`${pad(h)}:${pad(m)}:${pad(s)}`);
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Fetch all student gamification data
   const loadData = useCallback(async () => {
     try {
-      const [streakRes, quizRes, badgesRes, summaryRes] = await Promise.all([
+      const [streakRes, quizRes, badgesRes, summaryRes, missionsRes] = await Promise.all([
         fetch(`${API_URL}/student/${userId}/streak`).catch(() => null),
         fetch(`${API_URL}/daily-quizzes/${userId}`).catch(() => null),
         fetch(`${API_URL}/student/${userId}/badges`).catch(() => null),
         fetch(`${API_URL}/student/${userId}/home-summary`).catch(() => null),
+        fetch(`${API_URL}/student/${userId}/daily-missions`).catch(() => null),
       ]);
 
       if (streakRes?.ok) {
@@ -90,9 +116,20 @@ export default function QuestTabScreen() {
           setBadges(bData);
         }
       }
+      if (missionsRes?.ok) {
+        const mData = await missionsRes.json();
+        if (mData.claimed_missions) {
+          setClaimedMissions(mData.claimed_missions);
+        }
+        if (mData.total_stars !== undefined && mData.total_stars > 0) {
+          setTotalStars(mData.total_stars);
+        }
+      }
       if (summaryRes?.ok) {
         const sumData = await summaryRes.json();
-        setTotalStars(sumData.total_stars ?? 0);
+        if (sumData.total_stars !== undefined) {
+          setTotalStars(sumData.total_stars);
+        }
       }
     } catch (err) {
       console.log('Error loading quest data:', err);
@@ -125,9 +162,31 @@ export default function QuestTabScreen() {
     }
   };
 
-  const handleClaimMission = (missionId: string, starsReward: number) => {
+  const handleClaimMission = async (missionId: string, starsReward: number) => {
+    if (claimingMission || claimedMissions[missionId]) return;
+    setClaimingMission(missionId);
+
+    // Optimistic UI update
     setClaimedMissions(prev => ({ ...prev, [missionId]: true }));
     setTotalStars(prev => prev + starsReward);
+
+    try {
+      const res = await fetch(`${API_URL}/student/${userId}/daily-missions/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mission_id: missionId, stars_reward: starsReward }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.total_stars !== undefined) {
+          setTotalStars(data.total_stars);
+        }
+      }
+    } catch (err) {
+      console.log('Error claiming mission on server:', err);
+    } finally {
+      setClaimingMission(null);
+    }
   };
 
   const completedQuizSlots = dailyQuiz?.completed_count ?? 0;
@@ -213,7 +272,13 @@ export default function QuestTabScreen() {
           {/* 3. Daily Missions Checklist */}
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Daily Missions</Text>
-            <Text style={styles.sectionBadge}>Resets Daily</Text>
+            <View style={styles.resetHeaderGroup}>
+              <View style={styles.resetTimerBadge}>
+                <Ionicons name="time-outline" size={12} color={COLORS.primary} style={{ marginRight: 4 }} />
+                <Text style={styles.resetTimerText}>{timeUntilMidnight}</Text>
+              </View>
+              <Text style={styles.sectionBadge}>Resets Daily</Text>
+            </View>
           </View>
 
           {/* Mission 1: Story Explorer */}
@@ -246,9 +311,14 @@ export default function QuestTabScreen() {
               <TouchableOpacity
                 style={styles.claimButton}
                 activeOpacity={0.8}
+                disabled={claimingMission === 'story'}
                 onPress={() => handleClaimMission('story', 10)}
               >
-                <Text style={styles.claimButtonText}>Claim</Text>
+                {claimingMission === 'story' ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.claimButtonText}>Claim</Text>
+                )}
               </TouchableOpacity>
             )}
           </View>
@@ -291,9 +361,14 @@ export default function QuestTabScreen() {
               <TouchableOpacity
                 style={styles.claimButton}
                 activeOpacity={0.8}
+                disabled={claimingMission === 'quiz'}
                 onPress={() => handleClaimMission('quiz', 15)}
               >
-                <Text style={styles.claimButtonText}>Claim</Text>
+                {claimingMission === 'quiz' ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.claimButtonText}>Claim</Text>
+                )}
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
@@ -632,6 +707,26 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 10,
+  },
+  resetHeaderGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  resetTimerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EDE9FE',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#DDD6FE',
+  },
+  resetTimerText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.primary,
   },
   sectionLink: {
     fontSize: 12,

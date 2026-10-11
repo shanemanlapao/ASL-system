@@ -3,9 +3,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,8 +13,10 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../context/AuthContext";
 import { API_URL } from "../context/config";
+import { COLORS } from "../context/theme";
 
 export default function LoginScreen() {
   const { setUser } = useAuth();
@@ -54,6 +56,17 @@ export default function LoginScreen() {
         setLoginError(data.detail || "Invalid username or password.");
         return;
       }
+      if (Platform.OS === "web" && data.user?.role === "student") {
+        setLoginError("Student access is restricted to the Android Mobile App. Please use your Android device.");
+        setLoading(false);
+        return;
+      }
+      if (Platform.OS !== "web" && (data.user?.role === "teacher" || data.user?.role === "admin")) {
+        setLoginError("Teacher & Admin access is restricted to the Web Portal. Please log in using a web browser.");
+        setLoading(false);
+        return;
+      }
+
       setUser(data.user);
       if (data.user?.role === "admin") {
         router.replace("/admin" as any);
@@ -70,12 +83,17 @@ export default function LoginScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top", "bottom"]}>
       <KeyboardAvoidingView
         style={styles.container}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior="height"
+        keyboardVerticalOffset={20}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
 
           {/* ✅ Success banner from register */}
           {showSuccess && (
@@ -92,8 +110,12 @@ export default function LoginScreen() {
 
           {/* Logo and Header */}
           <View style={styles.headerContainer}>
-            <View style={styles.logoContainer}>
-              <Ionicons name="book" size={40} color="white" />
+            <View style={styles.logoWrapper}>
+              <Image
+                source={require("../assets/images/brightpath-logo.png")}
+                style={styles.logoImage}
+                resizeMode="cover"
+              />
             </View>
             <Text style={styles.title}>BrightPath</Text>
             <Text style={styles.subtitle}>
@@ -191,49 +213,119 @@ export default function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F8F9FA" },
+  safeArea: { flex: 1, backgroundColor: COLORS.background },
   container: { flex: 1 },
-  scrollContent: { flexGrow: 1, justifyContent: "center", padding: 20 },
-  headerContainer: { alignItems: "center", marginBottom: 40 },
-  logoContainer: {
-    width: 80, height: 80, backgroundColor: "#12B3C9",
-    borderRadius: 20, justifyContent: "center", alignItems: "center", marginBottom: 20,
+  scrollContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 40,
+    ...(Platform.OS === "web" ? { alignItems: "center" } : {}),
   },
-  title: { fontSize: 28, fontWeight: "bold", color: "#1F2937", marginBottom: 10 },
-  subtitle: { fontSize: 14, color: "#4B5563", textAlign: "center", paddingHorizontal: 20 },
+  headerContainer: {
+    alignItems: "center",
+    marginBottom: 32,
+    ...(Platform.OS === "web" ? { width: "100%", maxWidth: 440, alignSelf: "center" } : {}),
+  },
+  logoWrapper: {
+    width: 96,
+    height: 96,
+    borderRadius: 24,
+    overflow: "hidden",
+    marginBottom: 16,
+    backgroundColor: COLORS.card,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 6,
+    borderWidth: 1.5,
+    borderColor: COLORS.primaryBorder,
+  },
+  logoImage: {
+    width: "100%",
+    height: "100%",
+  },
+  title: { fontSize: 30, fontWeight: "800", color: COLORS.textPrimary, letterSpacing: -0.5, marginBottom: 8 },
+  subtitle: { fontSize: 14, color: COLORS.textSecondary, textAlign: "center", paddingHorizontal: 20, lineHeight: 20 },
   card: {
-    backgroundColor: "white", borderRadius: 24, padding: 24,
-    shadowColor: "#000", shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05, shadowRadius: 15, elevation: 3,
+    backgroundColor: COLORS.card,
+    borderRadius: 24,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.06,
+    shadowRadius: 20,
+    elevation: 4,
+    ...(Platform.OS === "web" ? { width: "100%", maxWidth: 440, alignSelf: "center" } : {}),
   },
-  cardTitle: { fontSize: 20, fontWeight: "600", color: "#1F2937", marginBottom: 24 },
-  inputGroup: { marginBottom: 20 },
-  label: { fontSize: 14, color: "#1F2937", marginBottom: 8 },
+  cardTitle: { fontSize: 20, fontWeight: "700", color: COLORS.textPrimary, marginBottom: 20 },
+  inputGroup: { marginBottom: 18 },
+  label: { fontSize: 13, fontWeight: "600", color: COLORS.textPrimary, marginBottom: 6 },
   inputContainer: {
-    flexDirection: "row", alignItems: "center", borderWidth: 1,
-    borderColor: "#E5E7EB", borderRadius: 12, paddingHorizontal: 16, height: 50,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    height: 52,
+    backgroundColor: "#FFFFFF",
   },
   inputIcon: { marginRight: 12 },
-  input: { flex: 1, fontSize: 14, color: "#1F2937" },
+  input: {
+    flex: 1,
+    fontSize: 15,
+    color: COLORS.textPrimary,
+    ...(Platform.OS === "web" ? ({ outlineStyle: "none" } as any) : {}),
+  },
   loginButton: {
-    backgroundColor: "#12B3C9", borderRadius: 12, height: 50,
-    justifyContent: "center", alignItems: "center", marginTop: 10, marginBottom: 16,
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+    height: 52,
+    justifyContent: "center",
+    alignItems: "center",
+    marginTop: 8,
+    marginBottom: 16,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  loginButtonDisabled: { backgroundColor: "#93C5D4" },
-  loginButtonText: { color: "white", fontSize: 16, fontWeight: "600" },
+  loginButtonDisabled: { backgroundColor: "#C4B5FD", shadowOpacity: 0 },
+  loginButtonText: { color: "white", fontSize: 16, fontWeight: "700" },
   registerRow: { flexDirection: "row", justifyContent: "center", alignItems: "center" },
-  registerText: { fontSize: 14, color: "#6B7280" },
-  registerLink: { fontSize: 14, color: "#12B3C9", fontWeight: "600" },
+  registerText: { fontSize: 14, color: COLORS.textSecondary },
+  registerLink: { fontSize: 14, color: COLORS.primary, fontWeight: "700" },
   successBanner: {
-    flexDirection: "row", alignItems: "center", backgroundColor: "#ECFDF5",
-    borderWidth: 1, borderColor: "#A7F3D0", borderRadius: 12,
-    paddingHorizontal: 14, paddingVertical: 10, marginBottom: 16, gap: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.successBg,
+    borderWidth: 1,
+    borderColor: COLORS.successBorder,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 16,
+    gap: 8,
+    ...(Platform.OS === "web" ? { width: "100%", maxWidth: 440, alignSelf: "center" } : {}),
   },
-  successBannerText: { color: "#059669", fontSize: 13, flex: 1, fontWeight: "500" },
+  successBannerText: { color: COLORS.success, fontSize: 13, flex: 1, fontWeight: "600" },
   errorBanner: {
-    flexDirection: "row", alignItems: "center", backgroundColor: "#FEF2F2",
-    borderWidth: 1, borderColor: "#FECACA", borderRadius: 12,
-    paddingHorizontal: 14, paddingVertical: 10, marginBottom: 16, gap: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.errorBg,
+    borderWidth: 1,
+    borderColor: COLORS.errorBorder,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 16,
+    gap: 8,
   },
-  errorBannerText: { color: "#EF4444", fontSize: 13, flex: 1 },
+  errorBannerText: { color: COLORS.error, fontSize: 13, flex: 1, fontWeight: "500" },
 });

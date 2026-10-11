@@ -8,13 +8,13 @@ Write-Host "0. Setting active subscription to Azure for Students ($SUBSCRIPTION_
 az account set --subscription $SUBSCRIPTION_ID
 
 $RESOURCE_GROUP = "rg-asl-learning-system"
-$LOCATION = "southeastasia"
-$APP_NAME = "asl-system-api"
+$LOCATION = "japaneast"
+$APP_NAME = "brightpath"
 $PLAN_NAME = "plan-asl-system"
-$DB_SERVER_NAME = "asl-db-server-wvsu"
-$DB_NAME = "asl_system_db"
-$DB_USER = "postgres"
-$DB_PASS = "WvsuAslPass2026!"
+$DB_HOST = "aws-0-ap-northeast-1.pooler.supabase.com"
+$DB_NAME = "postgres"
+$DB_USER = "postgres.dtyvgpweriwzyjahkcyk"
+$DB_PASS = "superbokeeer03"
 
 Write-Host "1. Creating Azure Resource Group ($RESOURCE_GROUP)..." -ForegroundColor Cyan
 az group create --name $RESOURCE_GROUP --location $LOCATION
@@ -29,7 +29,7 @@ Write-Host "4. Setting App Startup Command..." -ForegroundColor Cyan
 az webapp config set --resource-group $RESOURCE_GROUP --name $APP_NAME --startup-file "gunicorn -w 2 -k uvicorn.workers.UvicornWorker server:app --bind 0.0.0.0:8000 --timeout 120"
 
 Write-Host "5. Configuring Environment Variables..." -ForegroundColor Cyan
-az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $APP_NAME --settings DB_HOST="$DB_SERVER_NAME.postgres.database.azure.com" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASS" DB_PORT="5432" PYTHONUNBUFFERED="1"
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $APP_NAME --settings DB_HOST="$DB_HOST" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASS" DB_PORT="5432" DB_SSLMODE="require" PYTHONUNBUFFERED="1"
 
 Write-Host "6. Deploying Application Code to Azure..." -ForegroundColor Cyan
 az webapp up --name $APP_NAME --resource-group $RESOURCE_GROUP
