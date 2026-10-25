@@ -11,6 +11,7 @@ import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import { COLORS } from "../context/theme";
+import { useAccessibility } from "../context/AccessibilityContext";
 
 const STORAGE_KEY = "@brightpath_permissions_requested";
 
@@ -21,6 +22,7 @@ interface PermissionModalProps {
 
 export default function PermissionModal({ onDismiss }: PermissionModalProps) {
   const [showModal, setShowModal] = useState(false);
+  const { setHapticsEnabled } = useAccessibility();
 
   useEffect(() => {
     checkPermissionStatus();
@@ -41,6 +43,7 @@ export default function PermissionModal({ onDismiss }: PermissionModalProps) {
     try {
       // Request media library permission
       await ImagePicker.requestMediaLibraryPermissionsAsync();
+      await setHapticsEnabled(true);
     } catch (err) {
       console.log("Permission request error:", err);
     } finally {
@@ -49,6 +52,10 @@ export default function PermissionModal({ onDismiss }: PermissionModalProps) {
   };
 
   const handleSkip = async () => {
+    try {
+      // Explicitly disable vibration if user chooses 'Maybe Later'
+      await setHapticsEnabled(false);
+    } catch {}
     await markCompleted();
   };
 

@@ -18,27 +18,22 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
-import { API_URL } from '../context/config';
+import { API_URL, resolveMediaUrl } from '../context/config';
 import { useAuth } from '../context/AuthContext';
+import { BADGE_IMAGES } from './badges';
 
 interface Slide {
   description_text: string;
   image_url?: string;
 }
 
-interface MatchingPair {
-  left: string;
-  right: string;
-}
-
 interface Question {
   id?: number;
   question_text: string;
-  question_type: string;
+  question_type: 'multiple_choice';
   image_url?: string;
-  options: string[];
-  correct_option_index: number;
-  matching_pairs?: MatchingPair[];
+  options: string[]; // exactly 4 options: A, B, C, D
+  correct_option_index: number; // 0, 1, 2, or 3
   hint?: string;
 }
 
@@ -95,17 +90,27 @@ const getStoryGrammarBadge = (index: number) => {
 };
 
 const resolveImageUrl = (url?: string): string => {
-  if (!url) return '';
-  // Normalize any hardcoded IP or localhost to current active API_URL
-  if (url.includes('/static/')) {
-    const filename = url.substring(url.indexOf('/static/'));
-    return `${API_URL}${filename}`;
-  }
-  return url;
+  return resolveMediaUrl(url);
 };
 
 export default function TeacherDashboardScreen() {
-  const { user, logout } = useAuth();
+  const { user, logout, isLoading: authLoading } = useAuth();
+  const [authorized, setAuthorized] = useState(false);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user) {
+      router.replace('/');
+      return;
+    }
+    if (user.role !== 'teacher' && user.role !== 'admin') {
+      showAlert('Access Denied', 'Teacher Portal is restricted to authorized educators and administrators.');
+      router.replace('/');
+      return;
+    }
+    setAuthorized(true);
+  }, [user, authLoading]);
+
   const { width: windowWidth } = useWindowDimensions();
   const isDesktop = windowWidth >= 1000;
 
@@ -161,11 +166,10 @@ export default function TeacherDashboardScreen() {
   const [questions, setQuestions] = useState<Question[]>([
     {
       question_text: '',
-      question_type: 'descriptive',
+      question_type: 'multiple_choice',
       image_url: '',
       options: ['', '', '', ''],
       correct_option_index: 0,
-      matching_pairs: [{ left: '', right: '' }],
       hint: '',
     },
   ]);
@@ -183,6 +187,7 @@ export default function TeacherDashboardScreen() {
   const [loadingStudentDetails, setLoadingStudentDetails] = useState<boolean>(false);
   const [studentDossierTab, setStudentDossierTab] = useState<'attempts' | 'mastery' | 'badges'>('attempts');
   const [studentAttemptFilter, setStudentAttemptFilter] = useState<'all' | 'passed' | 'review'>('all');
+  const [studentMasteryTopicFilter, setStudentMasteryTopicFilter] = useState<string>('all');
   const [searchStudentQuery, setSearchStudentQuery] = useState<string>('');
   const [studentSortBy, setStudentSortBy] = useState<'stars' | 'attempts' | 'needs_support'>('stars');
 
@@ -209,6 +214,19 @@ export default function TeacherDashboardScreen() {
       window.alert(`${title}: ${message}`);
     } else {
       Alert.alert(title, message);
+    }
+  };
+
+  const confirmAction = (title: string, message: string, onConfirm: () => void) => {
+    if (Platform.OS === 'web') {
+      if (window.confirm(`${title}\n\n${message}`)) {
+        onConfirm();
+      }
+    } else {
+      Alert.alert(title, message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: onConfirm },
+      ]);
     }
   };
 
@@ -296,7 +314,10 @@ export default function TeacherDashboardScreen() {
   const fetchAnalytics = useCallback(async () => {
     setLoadingAnalytics(true);
     try {
-      const res = await fetch(`${API_URL}/admin/analytics`);
+      const res = await fetch(`${API_URL}/admin/analytics?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' }
+      });
       if (res.ok) {
         const data = await res.json();
         setAnalyticsData(data);
@@ -314,6 +335,7 @@ export default function TeacherDashboardScreen() {
     setLoadingStudentDetails(true);
     setStudentDossierTab('attempts');
     setStudentAttemptFilter('all');
+    setStudentMasteryTopicFilter('all');
     try {
       const studentId = student.user_id || student.id;
       const [attemptsRes, masteryRes, badgesRes] = await Promise.all([
@@ -331,7 +353,11 @@ export default function TeacherDashboardScreen() {
 
       if (masteryRes.ok) {
         const masteryData = await masteryRes.json();
-        setStudentKcMastery(Array.isArray(masteryData) ? masteryData : []);
+        setStudentKcMastery(
+          Array.isArray(masteryData) 
+            ? masteryData 
+            : (masteryData.kc_mastery || [])
+        );
       } else {
         setStudentKcMastery([]);
       }
@@ -399,7 +425,7 @@ export default function TeacherDashboardScreen() {
 
         if (!res.ok) throw new Error('Upload failed');
         const data = await res.json();
-        onSuccess(data.url);
+        onSuccess(resolveMediaUrl(data.url));
       } catch (err: any) {
         showAlert('Upload Error', err.message || 'Could not upload image.');
       }
@@ -474,67 +500,64 @@ export default function TeacherDashboardScreen() {
 
   // Delete Lesson Group (Move to Trash)
   const handleDeleteGroup = async (groupId: number, title: string) => {
-    const confirmDelete = Platform.OS === 'web'
-      ? window.confirm(`Move "${title}" and all its difficulty tiers to Trash?`)
-      : true;
-    if (!confirmDelete) return;
-
-    try {
-      const res = await fetch(`${API_URL}/admin/lesson-group/${groupId}`, { method: 'DELETE' });
-      if (res.ok) {
-        showAlert('Moved to Trash', `Lesson group "${title}" was moved to Trash.`);
-        fetchLessonGroups(selectedTopicId);
-        fetchTrash();
-        fetchHistory();
+    confirmAction('Move to Trash', `Move "${title}" and all its difficulty tiers to Trash?`, async () => {
+      try {
+        const teacherNameParam = encodeURIComponent(user?.name || user?.username || 'Teacher');
+        const teacherIdParam = user?.id ? `&teacher_id=${user.id}` : '';
+        const res = await fetch(`${API_URL}/admin/lesson-group/${groupId}?teacher_name=${teacherNameParam}${teacherIdParam}`, { method: 'DELETE' });
+        if (res.ok) {
+          showAlert('Moved to Trash', `Lesson group "${title}" was moved to Trash.`);
+          fetchLessonGroups(selectedTopicId);
+          fetchTrash();
+          fetchHistory();
+        }
+      } catch {
+        showAlert('Error', 'Could not move lesson group to trash.');
       }
-    } catch {
-      showAlert('Error', 'Could not move lesson group to trash.');
-    }
+    });
   };
 
   // Delete Individual Lesson Tier (Move to Trash)
   const handleDeleteLesson = async (lessonId: number, title: string) => {
-    const confirmDelete = Platform.OS === 'web'
-      ? window.confirm(`Move "${title}" to Trash?`)
-      : true;
-    if (!confirmDelete) return;
-
-    try {
-      const res = await fetch(`${API_URL}/admin/lesson/${lessonId}`, { method: 'DELETE' });
-      if (res.ok) {
-        showAlert('Moved to Trash', `Lesson "${title}" was moved to Trash.`);
-        fetchLessonGroups(selectedTopicId);
-        fetchTrash();
-        fetchHistory();
-      } else {
+    confirmAction('Move to Trash', `Move "${title}" to Trash?`, async () => {
+      try {
+        const teacherNameParam = encodeURIComponent(user?.name || user?.username || 'Teacher');
+        const teacherIdParam = user?.id ? `&teacher_id=${user.id}` : '';
+        const res = await fetch(`${API_URL}/admin/lesson/${lessonId}?teacher_name=${teacherNameParam}${teacherIdParam}`, { method: 'DELETE' });
+        if (res.ok) {
+          showAlert('Moved to Trash', `Lesson "${title}" was moved to Trash.`);
+          fetchLessonGroups(selectedTopicId);
+          fetchTrash();
+          fetchHistory();
+        } else {
+          showAlert('Error', 'Could not delete lesson.');
+        }
+      } catch {
         showAlert('Error', 'Could not delete lesson.');
       }
-    } catch {
-      showAlert('Error', 'Could not delete lesson.');
-    }
+    });
   };
 
   // Delete Quiz (Move to Trash)
   const handleDeleteQuiz = async (quizId: number, title: string) => {
-    const confirmDelete = Platform.OS === 'web'
-      ? window.confirm(`Move quiz "${title}" to Trash? This will allow you to create a new quiz for this lesson difficulty.`)
-      : true;
-    if (!confirmDelete) return;
-
-    try {
-      const res = await fetch(`${API_URL}/admin/quiz/${quizId}`, { method: 'DELETE' });
-      if (res.ok) {
-        showAlert('Moved to Trash', `Quiz "${title}" was moved to Trash.`);
-        fetchLessonGroups(selectedTopicId);
-        fetchQuizzes(selectedTopicId);
-        fetchTrash();
-        fetchHistory();
-      } else {
+    confirmAction('Move Quiz to Trash', `Move quiz "${title}" to Trash? This will allow you to create a new quiz for this lesson difficulty.`, async () => {
+      try {
+        const teacherNameParam = encodeURIComponent(user?.name || user?.username || 'Teacher');
+        const teacherIdParam = user?.id ? `&teacher_id=${user.id}` : '';
+        const res = await fetch(`${API_URL}/admin/quiz/${quizId}?teacher_name=${teacherNameParam}${teacherIdParam}`, { method: 'DELETE' });
+        if (res.ok) {
+          showAlert('Moved to Trash', `Quiz "${title}" was moved to Trash.`);
+          fetchLessonGroups(selectedTopicId);
+          fetchQuizzes(selectedTopicId);
+          fetchTrash();
+          fetchHistory();
+        } else {
+          showAlert('Error', 'Could not delete quiz.');
+        }
+      } catch {
         showAlert('Error', 'Could not delete quiz.');
       }
-    } catch {
-      showAlert('Error', 'Could not delete quiz.');
-    }
+    });
   };
 
   // Slide Editor Handlers
@@ -556,7 +579,11 @@ export default function TeacherDashboardScreen() {
       const res = await fetch(`${API_URL}/admin/lesson/${editingLesson.id}/slides`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slides: valid }),
+        body: JSON.stringify({
+          slides: valid,
+          teacher_name: user?.name || user?.username || 'Teacher',
+          teacher_id: user?.id,
+        }),
       });
       if (!res.ok) throw new Error('Failed to update slides.');
       showAlert('Success', 'Lesson slides updated successfully.');
@@ -589,19 +616,51 @@ export default function TeacherDashboardScreen() {
 
   const handleSaveEditQuiz = async () => {
     if (!editingQuiz) return;
-    const valid = editQuizQuestions.filter(q => q.question_text.trim() !== '');
-    if (valid.length === 0) {
+    if (!editQuizQuestions || editQuizQuestions.length === 0) {
       showAlert('Required', 'At least one question is required.');
       return;
     }
+
+    for (let i = 0; i < editQuizQuestions.length; i++) {
+      const q = editQuizQuestions[i];
+      if (!q.question_text.trim()) {
+        showAlert('Incomplete Question', `Question ${i + 1} is missing a question statement.`);
+        return;
+      }
+      if (!q.options || q.options.length !== 4) {
+        showAlert('Incomplete Choices', `Question ${i + 1} must have exactly 4 choices.`);
+        return;
+      }
+      for (let oIdx = 0; oIdx < 4; oIdx++) {
+        if (!q.options[oIdx] || !q.options[oIdx].trim()) {
+          showAlert('Incomplete Choices', `Option ${String.fromCharCode(65 + oIdx)} of Question ${i + 1} cannot be empty.`);
+          return;
+        }
+      }
+    }
+
+    const sanitizedQuestions = editQuizQuestions.map((q) => ({
+      ...q,
+      question_type: 'multiple_choice' as const,
+      options: q.options.map((opt) => opt.trim()),
+      correct_option_index: Math.max(0, Math.min(3, q.correct_option_index || 0)),
+    }));
+
     setSavingEditQuiz(true);
     try {
       const res = await fetch(`${API_URL}/admin/quiz/${editingQuiz.id}/questions`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ questions: valid }),
+        body: JSON.stringify({
+          questions: sanitizedQuestions,
+          teacher_name: user?.name || user?.username || 'Teacher',
+          teacher_id: user?.id,
+        }),
       });
-      if (!res.ok) throw new Error('Failed to update quiz questions.');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to update quiz questions.');
+      }
       showAlert('Success', 'Quiz updated successfully.');
       setEditingQuiz(null);
       fetchLessonGroups(selectedTopicId);
@@ -624,6 +683,7 @@ export default function TeacherDashboardScreen() {
           item_type: itemType,
           item_id: itemId,
           teacher_name: user?.name || user?.username || 'Teacher',
+          teacher_id: user?.id,
         }),
       });
       if (!res.ok) throw new Error('Failed to restore item.');
@@ -638,28 +698,26 @@ export default function TeacherDashboardScreen() {
   };
 
   const handlePermanentDeleteItem = async (itemType: string, itemId: number, title: string) => {
-    const confirm = Platform.OS === 'web'
-      ? window.confirm(`Permanently delete "${title}"? This cannot be undone.`)
-      : true;
-    if (!confirm) return;
-
-    try {
-      const res = await fetch(`${API_URL}/admin/trash/permanent`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          item_type: itemType,
-          item_id: itemId,
-          teacher_name: user?.name || user?.username || 'Teacher',
-        }),
-      });
-      if (!res.ok) throw new Error('Failed to permanently delete item.');
-      showAlert('Deleted', 'Item permanently removed.');
-      fetchTrash();
-      fetchHistory();
-    } catch (err: any) {
-      showAlert('Error', err.message || 'Could not delete item permanently.');
-    }
+    confirmAction('Permanent Delete', `Permanently delete "${title}"? This cannot be undone.`, async () => {
+      try {
+        const res = await fetch(`${API_URL}/admin/trash/permanent`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_type: itemType,
+            item_id: itemId,
+            teacher_name: user?.name || user?.username || 'Teacher',
+            teacher_id: user?.id,
+          }),
+        });
+        if (!res.ok) throw new Error('Failed to permanently delete item.');
+        showAlert('Deleted', 'Item permanently removed.');
+        fetchTrash();
+        fetchHistory();
+      } catch (err: any) {
+        showAlert('Error', err.message || 'Could not delete item permanently.');
+      }
+    });
   };
 
   // Active selected lesson group for quiz creation
@@ -687,6 +745,35 @@ export default function TeacherDashboardScreen() {
       showAlert('Required Field', 'Please select a Lesson for this quiz.');
       return;
     }
+    if (!questions || questions.length === 0) {
+      showAlert('Required Field', 'Please add at least one question.');
+      return;
+    }
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      if (!q.question_text.trim()) {
+        showAlert('Incomplete Question', `Question ${i + 1} is missing a question statement.`);
+        return;
+      }
+      if (!q.options || q.options.length !== 4) {
+        showAlert('Incomplete Choices', `Question ${i + 1} must have exactly 4 choices.`);
+        return;
+      }
+      for (let oIdx = 0; oIdx < 4; oIdx++) {
+        if (!q.options[oIdx] || !q.options[oIdx].trim()) {
+          showAlert('Incomplete Choices', `Option ${String.fromCharCode(65 + oIdx)} of Question ${i + 1} cannot be empty.`);
+          return;
+        }
+      }
+    }
+
+    const sanitizedQuestions = questions.map((q) => ({
+      ...q,
+      question_type: 'multiple_choice' as const,
+      options: q.options.map((opt) => opt.trim()),
+      correct_option_index: Math.max(0, Math.min(3, q.correct_option_index || 0)),
+    }));
 
     setSubmittingQuiz(true);
     try {
@@ -698,22 +785,26 @@ export default function TeacherDashboardScreen() {
           topic_id: selectedTopicId,
           lesson_id: selectedLessonId,
           difficulty: selectedQuizDifficulty,
-          questions,
+          questions: sanitizedQuestions,
+          teacher_name: user?.name || user?.username || 'Teacher',
+          teacher_id: user?.id,
         }),
       });
 
-      if (!res.ok) throw new Error('Failed to create quiz.');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to create quiz.');
+      }
 
       showAlert('Success', 'Quiz created and linked successfully.');
       setQuizTitle('');
       setQuestions([
         {
           question_text: '',
-          question_type: 'descriptive',
+          question_type: 'multiple_choice',
           image_url: '',
           options: ['', '', '', ''],
           correct_option_index: 0,
-          matching_pairs: [{ left: '', right: '' }],
           hint: '',
         },
       ]);
@@ -902,6 +993,17 @@ export default function TeacherDashboardScreen() {
       </View>
     );
   };
+
+  if (authLoading || !authorized) {
+    return (
+      <SafeAreaView style={[styles.safeArea, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#7C3AED" />
+        <Text style={{ marginTop: 12, fontSize: 14, color: '#64748B', fontWeight: '500' }}>
+          Verifying teacher authorization...
+        </Text>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -1838,43 +1940,17 @@ export default function TeacherDashboardScreen() {
                 {questions.map((q, qIdx) => (
                   <View key={qIdx} style={styles.questionBox}>
                     <View style={styles.questionBoxHeader}>
-                      <Text style={styles.slideNumber}>Question {qIdx + 1}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Text style={styles.slideNumber}>Question {qIdx + 1}</Text>
+                        <View style={[styles.typeBtnActive, { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12 }]}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#FFFFFF' }}>Multiple Choice</Text>
+                        </View>
+                      </View>
                       {questions.length > 1 && (
                         <TouchableOpacity onPress={() => setQuestions(questions.filter((_, i) => i !== qIdx))}>
                           <Ionicons name="trash-outline" size={18} color="#DC2626" />
                         </TouchableOpacity>
                       )}
-                    </View>
-
-                    {/* Question Type Toggle */}
-                    <View style={styles.typeToggleRow}>
-                      <TouchableOpacity
-                        style={[styles.typeBtn, q.question_type !== 'matching' && styles.typeBtnActive]}
-                        onPress={() => {
-                          const updated = [...questions];
-                          updated[qIdx].question_type = 'descriptive';
-                          setQuestions(updated);
-                        }}
-                      >
-                        <Text style={[styles.typeBtnText, q.question_type !== 'matching' && styles.typeBtnTextActive]}>
-                          Multiple Choice
-                        </Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.typeBtn, q.question_type === 'matching' && styles.typeBtnActive]}
-                        onPress={() => {
-                          const updated = [...questions];
-                          updated[qIdx].question_type = 'matching';
-                          if (!updated[qIdx].matching_pairs || updated[qIdx].matching_pairs!.length === 0) {
-                            updated[qIdx].matching_pairs = [{ left: '', right: '' }];
-                          }
-                          setQuestions(updated);
-                        }}
-                      >
-                        <Text style={[styles.typeBtnText, q.question_type === 'matching' && styles.typeBtnTextActive]}>
-                          Matching Pairs
-                        </Text>
-                      </TouchableOpacity>
                     </View>
 
                     <TextInput
@@ -1889,91 +1965,34 @@ export default function TeacherDashboardScreen() {
                       multiline
                     />
 
-                    {/* Multiple Choice Options */}
-                    {q.question_type !== 'matching' && (
-                      <View style={{ marginTop: 8 }}>
-                        <Text style={styles.subFieldLabel}>Choices (Select radio button for the correct answer):</Text>
-                        {q.options.map((opt, optIdx) => (
-                          <View key={optIdx} style={styles.optionRow}>
-                            <TouchableOpacity
-                              style={[styles.radio, q.correct_option_index === optIdx && styles.radioActive]}
-                              onPress={() => {
-                                const updated = [...questions];
-                                updated[qIdx].correct_option_index = optIdx;
-                                setQuestions(updated);
-                              }}
-                            >
-                              {q.correct_option_index === optIdx && <View style={styles.radioInner} />}
-                            </TouchableOpacity>
-                            <TextInput
-                              style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                              placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
-                              value={opt}
-                              onChangeText={(txt) => {
-                                const updated = [...questions];
-                                updated[qIdx].options[optIdx] = txt;
-                                setQuestions(updated);
-                              }}
-                            />
-                          </View>
-                        ))}
-                      </View>
-                    )}
-
-                    {/* Matching Pairs */}
-                    {q.question_type === 'matching' && (
-                      <View style={{ marginTop: 8 }}>
-                        <Text style={styles.subFieldLabel}>Matching Pairs (Left Item matches Right Item):</Text>
-                        {(q.matching_pairs || []).map((pair, pIdx) => (
-                          <View key={pIdx} style={styles.matchingRow}>
-                            <TextInput
-                              style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                              placeholder={`Left ${pIdx + 1}`}
-                              value={pair.left}
-                              onChangeText={(txt) => {
-                                const updated = [...questions];
-                                updated[qIdx].matching_pairs![pIdx].left = txt;
-                                setQuestions(updated);
-                              }}
-                            />
-                            <Ionicons name="arrow-forward" size={16} color="#64748B" style={{ marginHorizontal: 6 }} />
-                            <TextInput
-                              style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                              placeholder={`Right ${pIdx + 1}`}
-                              value={pair.right}
-                              onChangeText={(txt) => {
-                                const updated = [...questions];
-                                updated[qIdx].matching_pairs![pIdx].right = txt;
-                                setQuestions(updated);
-                              }}
-                            />
-                            {(q.matching_pairs || []).length > 1 && (
-                              <TouchableOpacity
-                                onPress={() => {
-                                  const updated = [...questions];
-                                  updated[qIdx].matching_pairs = updated[qIdx].matching_pairs!.filter((_, i) => i !== pIdx);
-                                  setQuestions(updated);
-                                }}
-                                style={{ marginLeft: 6 }}
-                              >
-                                <Ionicons name="close-circle-outline" size={20} color="#DC2626" />
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        ))}
-                        <TouchableOpacity
-                          style={styles.addPairBtn}
-                          onPress={() => {
-                            const updated = [...questions];
-                            updated[qIdx].matching_pairs = [...(updated[qIdx].matching_pairs || []), { left: '', right: '' }];
-                            setQuestions(updated);
-                          }}
-                        >
-                          <Ionicons name="add" size={16} color="#4F46E5" />
-                          <Text style={styles.addPairBtnText}>Add Matching Pair</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
+                    {/* 4-Choice Multiple Choice Options */}
+                    <View style={{ marginTop: 8 }}>
+                      <Text style={styles.subFieldLabel}>Choices (Select radio button for the correct answer):</Text>
+                      {q.options.map((opt, optIdx) => (
+                        <View key={optIdx} style={styles.optionRow}>
+                          <TouchableOpacity
+                            style={[styles.radio, q.correct_option_index === optIdx && styles.radioActive]}
+                            onPress={() => {
+                              const updated = [...questions];
+                              updated[qIdx].correct_option_index = optIdx;
+                              setQuestions(updated);
+                            }}
+                          >
+                            {q.correct_option_index === optIdx && <View style={styles.radioInner} />}
+                          </TouchableOpacity>
+                          <TextInput
+                            style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                            placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
+                            value={opt}
+                            onChangeText={(txt) => {
+                              const updated = [...questions];
+                              updated[qIdx].options[optIdx] = txt;
+                              setQuestions(updated);
+                            }}
+                          />
+                        </View>
+                      ))}
+                    </View>
 
                     {/* Visual Hint / Explanation */}
                     <Text style={[styles.subFieldLabel, { marginTop: 10 }]}>Visual Hint / Scaffolding Note (Optional):</Text>
@@ -1998,11 +2017,10 @@ export default function TeacherDashboardScreen() {
                       ...questions,
                       {
                         question_text: '',
-                        question_type: 'descriptive',
+                        question_type: 'multiple_choice',
                         image_url: '',
                         options: ['', '', '', ''],
                         correct_option_index: 0,
-                        matching_pairs: [{ left: '', right: '' }],
                         hint: '',
                       },
                     ])
@@ -2283,7 +2301,7 @@ export default function TeacherDashboardScreen() {
                             {/* Student Avatar */}
                             <View style={styles.studentAvatarCircle}>
                               {student.avatar_url ? (
-                                <Image source={{ uri: student.avatar_url }} style={styles.studentAvatarImg} />
+                                <Image source={{ uri: resolveMediaUrl(student.avatar_url) }} style={styles.studentAvatarImg} />
                               ) : (
                                 <Text style={styles.studentAvatarText}>
                                   {(student.name || 'Student').slice(0, 2).toUpperCase()}
@@ -2363,7 +2381,7 @@ export default function TeacherDashboardScreen() {
                     <View style={styles.dossierProfileTop}>
                       <View style={styles.dossierAvatar}>
                         {selectedStudentForInspect.avatar_url ? (
-                          <Image source={{ uri: selectedStudentForInspect.avatar_url }} style={styles.dossierAvatarImg} />
+                          <Image source={{ uri: resolveMediaUrl(selectedStudentForInspect.avatar_url) }} style={styles.dossierAvatarImg} />
                         ) : (
                           <Text style={styles.dossierAvatarText}>
                             {(selectedStudentForInspect.name || 'S').slice(0, 2).toUpperCase()}
@@ -2680,84 +2698,231 @@ export default function TeacherDashboardScreen() {
                         </View>
                       </View>
 
-                      {/* Mastery Summary Stat Tally */}
+                      {/* Mastery Summary Stat Tally & Categorized KC Breakdown */}
                       {(() => {
-                        const mastered = studentKcMastery.filter((k: any) => (k.p_mastery ?? 0) >= 0.70).length;
-                        const developing = studentKcMastery.filter((k: any) => (k.p_mastery ?? 0) >= 0.30 && (k.p_mastery ?? 0) < 0.70).length;
-                        const struggling = studentKcMastery.filter((k: any) => (k.p_mastery ?? 0) < 0.30 && (k.total_opportunities || 0) > 0).length;
+                        const activeKcs = studentKcMastery.filter((k: any) => 
+                          !['kc_123', 'kc_test_title', 'kc_test_2', 'kc_sample', 'KC_SG_CHARACTER', 'KC_SG_SETTING', 'KC_SG_PROBLEM', 'KC_SG_RESOLUTION'].includes(k.kc_name)
+                        );
+                        const mastered = activeKcs.filter((k: any) => (k.total_opportunities || 0) > 0 && (k.p_mastery ?? 0) >= 0.70).length;
+                        const developing = activeKcs.filter((k: any) => (k.total_opportunities || 0) > 0 && (k.p_mastery ?? 0) >= 0.30 && (k.p_mastery ?? 0) < 0.70).length;
+                        const struggling = activeKcs.filter((k: any) => (k.total_opportunities || 0) > 0 && (k.p_mastery ?? 0) < 0.30).length;
+                        const notStarted = activeKcs.filter((k: any) => (k.total_opportunities || 0) === 0).length;
+
+                        // Subject Metadata Mapping (4 Active Core Subjects)
+                        const TOPIC_CONFIG: Record<string, { label: string; icon: string; color: string; bg: string }> = {
+                          'story-grammar': { label: 'Story Grammar', icon: 'book-outline', color: '#4F46E5', bg: '#EEF2FF' },
+                          'mathematics': { label: 'Mathematics', icon: 'calculator-outline', color: '#2563EB', bg: '#EFF6FF' },
+                          'technology-and-livelihood-education': { label: 'TLE (ICT)', icon: 'desktop-outline', color: '#0D9488', bg: '#F0FDFA' },
+                          'araling-panlipunan': { label: 'Araling Panlipunan', icon: 'globe-outline', color: '#D97706', bg: '#FFFBEB' },
+                        };
+
+                        // Unique topics present in active KCs
+                        const availableTopics = Array.from(new Set(activeKcs.map((k: any) => k.topic_id || 'general')));
+
+                        const filteredKcs = activeKcs.filter((k: any) => {
+                          if (studentMasteryTopicFilter === 'all') return true;
+                          return (k.topic_id || 'general') === studentMasteryTopicFilter;
+                        });
+
+                        // Group filtered KCs by topic
+                        const groupedKcs: Record<string, any[]> = {};
+                        filteredKcs.forEach((k: any) => {
+                          const tid = k.topic_id || 'general';
+                          if (!groupedKcs[tid]) groupedKcs[tid] = [];
+                          groupedKcs[tid].push(k);
+                        });
 
                         return (
-                          <View style={styles.bktSummaryRow}>
-                            <View style={[styles.bktSummaryCard, { borderColor: '#A7F3D0', backgroundColor: '#F0FDF4' }]}>
-                              <Text style={[styles.bktSummaryValue, { color: '#059669' }]}>{mastered}</Text>
-                              <Text style={styles.bktSummaryLabel}>Mastered (&gt;=70%)</Text>
+                          <>
+                            {/* Summary Cards Row */}
+                            <View style={styles.bktSummaryRow}>
+                              <View style={[styles.bktSummaryCard, { borderColor: '#A7F3D0', backgroundColor: '#F0FDF4' }]}>
+                                <Text style={[styles.bktSummaryValue, { color: '#059669' }]}>{mastered}</Text>
+                                <Text style={styles.bktSummaryLabel}>Mastered (≥70%)</Text>
+                              </View>
+                              <View style={[styles.bktSummaryCard, { borderColor: '#FDE68A', backgroundColor: '#FFFBEB' }]}>
+                                <Text style={[styles.bktSummaryValue, { color: '#D97706' }]}>{developing}</Text>
+                                <Text style={styles.bktSummaryLabel}>Developing (30-69%)</Text>
+                              </View>
+                              <View style={[styles.bktSummaryCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
+                                <Text style={[styles.bktSummaryValue, { color: '#DC2626' }]}>{struggling}</Text>
+                                <Text style={styles.bktSummaryLabel}>Struggling (&lt;30%)</Text>
+                              </View>
+                              <View style={[styles.bktSummaryCard, { borderColor: '#CBD5E1', backgroundColor: '#F8FAFC' }]}>
+                                <Text style={[styles.bktSummaryValue, { color: '#64748B' }]}>{notStarted}</Text>
+                                <Text style={styles.bktSummaryLabel}>Not Started</Text>
+                              </View>
                             </View>
-                            <View style={[styles.bktSummaryCard, { borderColor: '#FDE68A', backgroundColor: '#FFFBEB' }]}>
-                              <Text style={[styles.bktSummaryValue, { color: '#D97706' }]}>{developing}</Text>
-                              <Text style={styles.bktSummaryLabel}>Developing (30-69%)</Text>
-                            </View>
-                            <View style={[styles.bktSummaryCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
-                              <Text style={[styles.bktSummaryValue, { color: '#DC2626' }]}>{struggling}</Text>
-                              <Text style={styles.bktSummaryLabel}>Struggling (&lt;30%)</Text>
-                            </View>
-                          </View>
+
+                            {/* Subject Category Filter Chips */}
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
+                              <View style={styles.attemptsFilterRow}>
+                                <TouchableOpacity
+                                  style={[
+                                    styles.filterChip,
+                                    studentMasteryTopicFilter === 'all' && styles.filterChipActive,
+                                  ]}
+                                  onPress={() => setStudentMasteryTopicFilter('all')}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.filterChipText,
+                                      studentMasteryTopicFilter === 'all' && styles.filterChipTextActive,
+                                    ]}
+                                  >
+                                    All Subjects ({activeKcs.length})
+                                  </Text>
+                                </TouchableOpacity>
+
+                                {availableTopics.map((topicId) => {
+                                  const meta = TOPIC_CONFIG[topicId] || { label: topicId, icon: 'folder-outline', color: '#64748B' };
+                                  const topicCount = activeKcs.filter((k: any) => (k.topic_id || 'general') === topicId).length;
+                                  const isActive = studentMasteryTopicFilter === topicId;
+                                  return (
+                                    <TouchableOpacity
+                                      key={topicId}
+                                      style={[
+                                        styles.filterChip,
+                                        isActive && styles.filterChipActive,
+                                      ]}
+                                      onPress={() => setStudentMasteryTopicFilter(topicId)}
+                                    >
+                                      <Ionicons
+                                        name={meta.icon as any}
+                                        size={13}
+                                        color={isActive ? '#4F46E5' : meta.color}
+                                      />
+                                      <Text
+                                        style={[
+                                          styles.filterChipText,
+                                          isActive && styles.filterChipTextActive,
+                                        ]}
+                                      >
+                                        {meta.label} ({topicCount})
+                                      </Text>
+                                    </TouchableOpacity>
+                                  );
+                                })}
+                              </View>
+                            </ScrollView>
+
+                            {/* Categorized Subject Sections */}
+                            {filteredKcs.length === 0 ? (
+                              <View style={styles.directoryEmptyBox}>
+                                <Ionicons name="hardware-chip-outline" size={32} color="#CBD5E1" />
+                                <Text style={styles.emptyText}>No knowledge components found under this subject.</Text>
+                              </View>
+                            ) : (
+                              Object.entries(groupedKcs).map(([topicId, kcs]) => {
+                                const meta = TOPIC_CONFIG[topicId] || { label: topicId, icon: 'folder-outline', color: '#64748B', bg: '#F8FAFC' };
+                                const topicMastered = kcs.filter((k: any) => (k.total_opportunities || 0) > 0 && (k.p_mastery ?? 0) >= 0.70).length;
+                                const topicUntested = kcs.filter((k: any) => (k.total_opportunities || 0) === 0).length;
+
+                                return (
+                                  <View key={topicId} style={{ marginBottom: 20 }}>
+                                    {/* Subject Section Header */}
+                                    <View style={{
+                                      flexDirection: 'row',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      backgroundColor: meta.bg,
+                                      paddingVertical: 10,
+                                      paddingHorizontal: 14,
+                                      borderRadius: 10,
+                                      borderLeftWidth: 4,
+                                      borderLeftColor: meta.color,
+                                      marginBottom: 10,
+                                    }}>
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                        <Ionicons name={meta.icon as any} size={18} color={meta.color} />
+                                        <Text style={{ fontSize: 15, fontWeight: '700', color: '#1E293B' }}>
+                                          {meta.label}
+                                        </Text>
+                                      </View>
+                                      <Text style={{ fontSize: 12, fontWeight: '600', color: meta.color }}>
+                                        {topicMastered}/{kcs.length} Mastered {topicUntested > 0 ? `• ${topicUntested} Untested` : ''}
+                                      </Text>
+                                    </View>
+
+                                    {/* Subject KC Cards */}
+                                    {kcs.map((kc: any) => {
+                                      const totalOpp = kc.total_opportunities || 0;
+                                      const pMastery = kc.p_mastery ?? 0;
+                                      const pct = Math.round(kc.p_mastery_pct ?? (pMastery * 100));
+
+                                      let statusLabel = 'Not Started';
+                                      let statusColor = '#64748B';
+                                      let statusBg = '#F1F5F9';
+                                      let barColor = '#CBD5E1';
+
+                                      if (totalOpp > 0) {
+                                        if (pMastery >= 0.70) {
+                                          statusLabel = 'Mastered';
+                                          statusColor = '#059669';
+                                          statusBg = '#ECFDF5';
+                                          barColor = '#059669';
+                                        } else if (pMastery >= 0.30) {
+                                          statusLabel = 'Developing';
+                                          statusColor = '#D97706';
+                                          statusBg = '#FFFBEB';
+                                          barColor = '#D97706';
+                                        } else {
+                                          statusLabel = 'Struggling';
+                                          statusColor = '#DC2626';
+                                          statusBg = '#FEF2F2';
+                                          barColor = '#DC2626';
+                                        }
+                                      }
+
+                                      return (
+                                        <View key={kc.kc_name} style={styles.kcCard}>
+                                          <View style={styles.kcCardHeader}>
+                                            <View style={{ flex: 1, marginRight: 8 }}>
+                                              <Text style={styles.kcTitle}>{kc.display_name || kc.kc_name}</Text>
+                                              <Text style={styles.kcTopic}>{meta.label}</Text>
+                                            </View>
+
+                                            <View style={[styles.kcStatusPill, { backgroundColor: statusBg }]}>
+                                              <Text style={[styles.kcStatusPillText, { color: statusColor }]}>
+                                                {statusLabel}
+                                              </Text>
+                                            </View>
+                                          </View>
+
+                                          {/* Mastery Progress Bar */}
+                                          <View style={styles.kcProgressBarTrack}>
+                                            <View
+                                              style={[
+                                                styles.kcProgressBarFill,
+                                                { 
+                                                  width: totalOpp > 0 ? `${Math.min(100, Math.max(0, pct))}%` : '0%', 
+                                                  backgroundColor: barColor 
+                                                },
+                                              ]}
+                                            />
+                                          </View>
+
+                                          {/* Metrics Details */}
+                                          <View style={styles.kcFooterRow}>
+                                            <Text style={styles.kcMasteryPercent}>
+                                              P(Mastery): <Text style={{ color: totalOpp > 0 ? statusColor : '#64748B', fontWeight: '700' }}>
+                                                {totalOpp > 0 ? `${pct}%` : 'Baseline Prior (10%)'}
+                                              </Text>
+                                            </Text>
+                                            <Text style={styles.kcCountsText}>
+                                              {kc.correct_count || 0} Correct • {kc.wrong_count || 0} Wrong • {totalOpp} Opportunities
+                                            </Text>
+                                          </View>
+                                        </View>
+                                      );
+                                    })}
+                                  </View>
+                                );
+                              })
+                            )}
+                          </>
                         );
                       })()}
-
-                      {/* KC Mastery List */}
-                      {studentKcMastery.length === 0 ? (
-                        <View style={styles.directoryEmptyBox}>
-                          <Ionicons name="hardware-chip-outline" size={32} color="#CBD5E1" />
-                          <Text style={styles.emptyText}>No knowledge components tracked yet.</Text>
-                        </View>
-                      ) : (
-                        studentKcMastery.map((kc: any) => {
-                          const pMastery = kc.p_mastery ?? 0;
-                          const pct = Math.round(kc.p_mastery_pct ?? (pMastery * 100));
-                          const isMastered = pMastery >= 0.70;
-                          const isDeveloping = pMastery >= 0.30 && pMastery < 0.70;
-                          const statusColor = isMastered ? '#059669' : isDeveloping ? '#D97706' : '#DC2626';
-                          const statusBg = isMastered ? '#ECFDF5' : isDeveloping ? '#FFFBEB' : '#FEF2F2';
-                          const statusLabel = isMastered ? 'Mastered' : isDeveloping ? 'Developing' : 'Struggling';
-
-                          return (
-                            <View key={kc.kc_name} style={styles.kcCard}>
-                              <View style={styles.kcCardHeader}>
-                                <View style={{ flex: 1, marginRight: 8 }}>
-                                  <Text style={styles.kcTitle}>{kc.display_name || kc.kc_name}</Text>
-                                  <Text style={styles.kcTopic}>{kc.topic_id || 'General'}</Text>
-                                </View>
-
-                                <View style={[styles.kcStatusPill, { backgroundColor: statusBg }]}>
-                                  <Text style={[styles.kcStatusPillText, { color: statusColor }]}>
-                                    {statusLabel}
-                                  </Text>
-                                </View>
-                              </View>
-
-                              {/* Mastery Progress Bar */}
-                              <View style={styles.kcProgressBarTrack}>
-                                <View
-                                  style={[
-                                    styles.kcProgressBarFill,
-                                    { width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: statusColor },
-                                  ]}
-                                />
-                              </View>
-
-                              {/* Metrics Details */}
-                              <View style={styles.kcFooterRow}>
-                                <Text style={styles.kcMasteryPercent}>
-                                  P(Mastery): <Text style={{ color: statusColor, fontWeight: '700' }}>{pct}%</Text>
-                                </Text>
-                                <Text style={styles.kcCountsText}>
-                                  {kc.correct_count || 0} Correct • {kc.wrong_count || 0} Wrong • {kc.total_opportunities || 0} Opportunities
-                                </Text>
-                              </View>
-                            </View>
-                          );
-                        })
-                      )}
                     </View>
                   ) : (
                     /* ── TAB 3: MILESTONE ACHIEVEMENTS & BADGES ── */
@@ -2778,18 +2943,36 @@ export default function TeacherDashboardScreen() {
                               !badge.unlocked && styles.badgeCardLocked,
                             ]}
                           >
-                            <View
-                              style={[
-                                styles.badgeIconCircle,
-                                { backgroundColor: badge.unlocked ? (badge.color ? `${badge.color}20` : '#EEF2FF') : '#F1F5F9' },
-                              ]}
-                            >
-                              <Ionicons
-                                name={(badge.icon as any) || 'trophy-outline'}
-                                size={22}
-                                color={badge.unlocked ? (badge.color || '#4F46E5') : '#94A3B8'}
-                              />
-                            </View>
+                            {BADGE_IMAGES && BADGE_IMAGES[badge.id] ? (
+                              <View style={styles.badgeImageWrapper}>
+                                <Image
+                                  source={BADGE_IMAGES[badge.id]}
+                                  style={[
+                                    styles.badgeImage,
+                                    !badge.unlocked && styles.badgeImageLocked,
+                                  ]}
+                                  resizeMode="cover"
+                                />
+                                {!badge.unlocked && (
+                                  <View style={styles.badgeImageLockOverlay}>
+                                    <Ionicons name="lock-closed" size={14} color="#FFFFFF" />
+                                  </View>
+                                )}
+                              </View>
+                            ) : (
+                              <View
+                                style={[
+                                  styles.badgeIconCircle,
+                                  { backgroundColor: badge.unlocked ? (badge.color ? `${badge.color}20` : '#EEF2FF') : '#F1F5F9' },
+                                ]}
+                              >
+                                <Ionicons
+                                  name={(badge.icon as any) || 'trophy-outline'}
+                                  size={22}
+                                  color={badge.unlocked ? (badge.color || '#4F46E5') : '#94A3B8'}
+                                />
+                              </View>
+                            )}
 
                             <View style={{ flex: 1 }}>
                               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
@@ -3156,7 +3339,12 @@ export default function TeacherDashboardScreen() {
                 {editQuizQuestions.map((q, qIdx) => (
                   <View key={qIdx} style={styles.questionBox}>
                     <View style={styles.questionBoxHeader}>
-                      <Text style={styles.slideNumber}>Question {qIdx + 1}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Text style={styles.slideNumber}>Question {qIdx + 1}</Text>
+                        <View style={[styles.typeBtnActive, { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12 }]}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#FFFFFF' }}>Multiple Choice</Text>
+                        </View>
+                      </View>
                       {editQuizQuestions.length > 1 && (
                         <TouchableOpacity
                           onPress={() => setEditQuizQuestions(editQuizQuestions.filter((_, i) => i !== qIdx))}
@@ -3164,37 +3352,6 @@ export default function TeacherDashboardScreen() {
                           <Ionicons name="trash-outline" size={18} color="#DC2626" />
                         </TouchableOpacity>
                       )}
-                    </View>
-
-                    {/* Question Type Toggle */}
-                    <View style={styles.typeToggleRow}>
-                      <TouchableOpacity
-                        style={[styles.typeBtn, q.question_type !== 'matching' && styles.typeBtnActive]}
-                        onPress={() => {
-                          const updated = [...editQuizQuestions];
-                          updated[qIdx].question_type = 'descriptive';
-                          setEditQuizQuestions(updated);
-                        }}
-                      >
-                        <Text style={[styles.typeBtnText, q.question_type !== 'matching' && styles.typeBtnTextActive]}>
-                          Multiple Choice
-                        </Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.typeBtn, q.question_type === 'matching' && styles.typeBtnActive]}
-                        onPress={() => {
-                          const updated = [...editQuizQuestions];
-                          updated[qIdx].question_type = 'matching';
-                          if (!updated[qIdx].matching_pairs || updated[qIdx].matching_pairs!.length === 0) {
-                            updated[qIdx].matching_pairs = [{ left: '', right: '' }];
-                          }
-                          setEditQuizQuestions(updated);
-                        }}
-                      >
-                        <Text style={[styles.typeBtnText, q.question_type === 'matching' && styles.typeBtnTextActive]}>
-                          Matching Pairs
-                        </Text>
-                      </TouchableOpacity>
                     </View>
 
                     <TextInput
@@ -3209,89 +3366,35 @@ export default function TeacherDashboardScreen() {
                       multiline
                     />
 
-                    {/* Options or Matching */}
-                    {q.question_type !== 'matching' ? (
-                      <View style={{ marginTop: 8 }}>
-                        <Text style={styles.subFieldLabel}>Choices (Select radio button for the correct answer):</Text>
-                        {(q.options || ['', '', '', '']).map((opt, optIdx) => (
-                          <View key={optIdx} style={styles.optionRow}>
-                            <TouchableOpacity
-                              style={[styles.radio, q.correct_option_index === optIdx && styles.radioActive]}
-                              onPress={() => {
-                                const updated = [...editQuizQuestions];
-                                updated[qIdx].correct_option_index = optIdx;
-                                setEditQuizQuestions(updated);
-                              }}
-                            >
-                              {q.correct_option_index === optIdx && <View style={styles.radioInner} />}
-                            </TouchableOpacity>
-                            <TextInput
-                              style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                              placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
-                              value={opt}
-                              onChangeText={(txt) => {
-                                const updated = [...editQuizQuestions];
-                                if (!updated[qIdx].options) updated[qIdx].options = ['', '', '', ''];
-                                updated[qIdx].options[optIdx] = txt;
-                                setEditQuizQuestions(updated);
-                              }}
-                            />
-                          </View>
-                        ))}
-                      </View>
-                    ) : (
-                      <View style={{ marginTop: 8 }}>
-                        <Text style={styles.subFieldLabel}>Matching Pairs:</Text>
-                        {(q.matching_pairs || []).map((pair, pIdx) => (
-                          <View key={pIdx} style={styles.matchingRow}>
-                            <TextInput
-                              style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                              placeholder={`Left ${pIdx + 1}`}
-                              value={pair.left}
-                              onChangeText={(txt) => {
-                                const updated = [...editQuizQuestions];
-                                updated[qIdx].matching_pairs![pIdx].left = txt;
-                                setEditQuizQuestions(updated);
-                              }}
-                            />
-                            <Ionicons name="arrow-forward" size={16} color="#64748B" style={{ marginHorizontal: 6 }} />
-                            <TextInput
-                              style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                              placeholder={`Right ${pIdx + 1}`}
-                              value={pair.right}
-                              onChangeText={(txt) => {
-                                const updated = [...editQuizQuestions];
-                                updated[qIdx].matching_pairs![pIdx].right = txt;
-                                setEditQuizQuestions(updated);
-                              }}
-                            />
-                            {(q.matching_pairs || []).length > 1 && (
-                              <TouchableOpacity
-                                onPress={() => {
-                                  const updated = [...editQuizQuestions];
-                                  updated[qIdx].matching_pairs = updated[qIdx].matching_pairs!.filter((_, i) => i !== pIdx);
-                                  setEditQuizQuestions(updated);
-                                }}
-                                style={{ marginLeft: 6 }}
-                              >
-                                <Ionicons name="close-circle-outline" size={20} color="#DC2626" />
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        ))}
-                        <TouchableOpacity
-                          style={styles.addPairBtn}
-                          onPress={() => {
-                            const updated = [...editQuizQuestions];
-                            updated[qIdx].matching_pairs = [...(updated[qIdx].matching_pairs || []), { left: '', right: '' }];
-                            setEditQuizQuestions(updated);
-                          }}
-                        >
-                          <Ionicons name="add" size={16} color="#4F46E5" />
-                          <Text style={styles.addPairBtnText}>Add Matching Pair</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
+                    {/* 4-Choice Multiple Choice Options */}
+                    <View style={{ marginTop: 8 }}>
+                      <Text style={styles.subFieldLabel}>Choices (Select radio button for the correct answer):</Text>
+                      {(q.options || ['', '', '', '']).map((opt, optIdx) => (
+                        <View key={optIdx} style={styles.optionRow}>
+                          <TouchableOpacity
+                            style={[styles.radio, q.correct_option_index === optIdx && styles.radioActive]}
+                            onPress={() => {
+                              const updated = [...editQuizQuestions];
+                              updated[qIdx].correct_option_index = optIdx;
+                              setEditQuizQuestions(updated);
+                            }}
+                          >
+                            {q.correct_option_index === optIdx && <View style={styles.radioInner} />}
+                          </TouchableOpacity>
+                          <TextInput
+                            style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                            placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
+                            value={opt}
+                            onChangeText={(txt) => {
+                              const updated = [...editQuizQuestions];
+                              if (!updated[qIdx].options) updated[qIdx].options = ['', '', '', ''];
+                              updated[qIdx].options[optIdx] = txt;
+                              setEditQuizQuestions(updated);
+                            }}
+                          />
+                        </View>
+                      ))}
+                    </View>
 
                     <Text style={[styles.subFieldLabel, { marginTop: 10 }]}>Visual Hint / Explanation (Optional):</Text>
                     <TextInput
@@ -3314,11 +3417,10 @@ export default function TeacherDashboardScreen() {
                       ...editQuizQuestions,
                       {
                         question_text: '',
-                        question_type: 'descriptive',
+                        question_type: 'multiple_choice',
                         image_url: '',
                         options: ['', '', '', ''],
                         correct_option_index: 0,
-                        matching_pairs: [{ left: '', right: '' }],
                         hint: '',
                       },
                     ])
@@ -5257,6 +5359,35 @@ const styles = StyleSheet.create({
   badgeCardLocked: {
     backgroundColor: '#F8FAFC',
     opacity: 0.75,
+  },
+  badgeImageWrapper: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    overflow: 'hidden',
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+  },
+  badgeImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  badgeImageLocked: {
+    opacity: 0.35,
+  },
+  badgeImageLockOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(30, 41, 59, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 22,
   },
   badgeIconCircle: {
     width: 44,

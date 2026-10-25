@@ -20,16 +20,16 @@ Write-Host "1. Creating Azure Resource Group ($RESOURCE_GROUP)..." -ForegroundCo
 az group create --name $RESOURCE_GROUP --location $LOCATION
 
 Write-Host "2. Creating Azure App Service Plan..." -ForegroundColor Cyan
-az appservice plan create --name $PLAN_NAME --resource-group $RESOURCE_GROUP --sku B1 --is-linux
+az appservice plan create --name $PLAN_NAME --resource-group $RESOURCE_GROUP --sku B2 --is-linux
 
 Write-Host "3. Creating Azure Web App for Python 3.11..." -ForegroundColor Cyan
 az webapp create --resource-group $RESOURCE_GROUP --plan $PLAN_NAME --name $APP_NAME --runtime "PYTHON:3.11"
 
 Write-Host "4. Setting App Startup Command..." -ForegroundColor Cyan
-az webapp config set --resource-group $RESOURCE_GROUP --name $APP_NAME --startup-file "gunicorn -w 2 -k uvicorn.workers.UvicornWorker server:app --bind 0.0.0.0:8000 --timeout 120"
+az webapp config set --resource-group $RESOURCE_GROUP --name $APP_NAME --startup-file "gunicorn -w 1 -k uvicorn.workers.UvicornWorker server:app --bind 0.0.0.0:8000 --timeout 600"
 
 Write-Host "5. Configuring Environment Variables..." -ForegroundColor Cyan
-az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $APP_NAME --settings DB_HOST="$DB_HOST" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASS" DB_PORT="5432" DB_SSLMODE="require" PYTHONUNBUFFERED="1"
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $APP_NAME --settings DB_HOST="$DB_HOST" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASS" DB_PORT="5432" DB_SSLMODE="require" PYTHONUNBUFFERED="1" WEBSITES_CONTAINER_START_TIME_LIMIT="1800" ENABLE_NEURAL_MBART="1"
 
 Write-Host "6. Deploying Application Code to Azure..." -ForegroundColor Cyan
 az webapp up --name $APP_NAME --resource-group $RESOURCE_GROUP

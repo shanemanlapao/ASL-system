@@ -1,15 +1,18 @@
+import React, { useEffect, useState, useRef } from 'react';
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
-import React, { useEffect, useState, useRef } from 'react';
-import { SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View, ActivityIndicator, Animated, Platform } from "react-native";
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View, ActivityIndicator, Animated, Platform } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useSubjects } from "../../context/SubjectsContext";
 import { useAuth } from "../../context/AuthContext";
 import { API_URL } from "../../context/config";
+import { useAccessibility } from "../../context/AccessibilityContext";
 import {
   cacheTopicLessons,
   getCachedTopicLessons,
   cacheStudentProgress,
   getCachedStudentProgress,
+  preCacheTopicQuizzes,
 } from "../../context/OfflineCache";
 
 interface LessonGroup {
@@ -52,6 +55,7 @@ export default function TopicScreen() {
     }
   }
 
+  const { highContrast } = useAccessibility();
   const [isDeafEnglish, setIsDeafEnglish] = useState<boolean>(false);
   const [lessonGroups, setLessonGroups] = useState<LessonGroup[]>([]);
   const [studentProgress, setStudentProgress] = useState<Record<number, LessonProgress>>({});
@@ -108,6 +112,10 @@ export default function TopicScreen() {
       // Cache for offline resilience
       if (groupsData.length > 0) {
         await cacheTopicLessons(id as string, groupsData);
+        // Pre-cache all quizzes for this topic so they work offline
+        preCacheTopicQuizzes(API_URL, id as string).catch(err => {
+          console.log("Error pre-caching topic quizzes:", err);
+        });
       }
       if (Object.keys(progMap).length > 0) {
         await cacheStudentProgress(userId, id as string, progMap);
@@ -137,7 +145,7 @@ export default function TopicScreen() {
 
   if (!topic) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.centerContainer}>
           <Text>Topic not found</Text>
           <TouchableOpacity onPress={() => router.back()} style={{ marginTop: 20 }}>
@@ -150,7 +158,7 @@ export default function TopicScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color="#0284C7" />
           <Text style={{ marginTop: 10, color: '#6B7280' }}>Loading topic content...</Text>
@@ -169,7 +177,7 @@ export default function TopicScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -267,14 +275,14 @@ export default function TopicScreen() {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: "#F8F9FA" },
   centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 40, paddingBottom: 20, backgroundColor: '#F8F9FA' },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 16, backgroundColor: '#F8F9FA' },
   backButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#E0F2FE', justifyContent: 'center', alignItems: 'center', marginRight: 16 },
   headerTitle: { flex: 1, fontSize: 20, fontWeight: 'bold', color: '#1F2937' },
   deafButton: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, backgroundColor: '#E0F2FE', borderWidth: 1, borderColor: '#0284C7' },
   deafButtonActive: { backgroundColor: '#0284C7' },
   deafButtonText: { fontSize: 14, fontWeight: '600', color: '#0284C7' },
   deafButtonTextActive: { color: 'white' },
-  scrollViewContent: { padding: 20, paddingBottom: 40 },
+  scrollViewContent: { padding: 20, paddingBottom: 60 },
   questCard: { backgroundColor: "white", borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1, borderColor: "#E0F2FE", shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 10, elevation: 2 },
   questCardLocked: { backgroundColor: "#F9FAFB", borderColor: "#E5E7EB", opacity: 0.75 },
   questCardActive: {

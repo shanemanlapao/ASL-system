@@ -1,13 +1,126 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, ActivityIndicator, Dimensions, Animated, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Dimensions, Animated, Platform } from 'react-native';
+import { Image } from 'expo-image';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../context/AuthContext';
 import { API_URL } from '../context/config';
 import { cacheFlashcards, getCachedFlashcards } from '../context/OfflineCache';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const { width } = Dimensions.get('window');
+
+const FLASHCARD_IMAGES: Record<number, any> = {
+  // Story Grammar
+  1: require('../assets/images/flashcards/sg_character.jpg'),
+  2: require('../assets/images/flashcards/sg_setting.jpg'),
+  3: require('../assets/images/flashcards/sg_problem.jpg'),
+  4: require('../assets/images/flashcards/sg_resolution.jpg'),
+  5: require('../assets/images/flashcards/sg_first.jpg'),
+  6: require('../assets/images/flashcards/sg_finally.jpg'),
+  // Mathematics (Animated 2D Vector GIFs)
+  201: require('../assets/images/flashcards/math_translation.gif'),
+  202: require('../assets/images/flashcards/math_reflection.gif'),
+  203: require('../assets/images/flashcards/math_rotation.gif'),
+  204: require('../assets/images/flashcards/math_symmetry.gif'),
+  205: require('../assets/images/flashcards/math_congruent.gif'),
+  206: require('../assets/images/flashcards/math_grid.gif'),
+  // Technology and Livelihood Education (Animated 2D Vector GIFs)
+  301: require('../assets/images/flashcards/tle_webcam_privacy.gif'),
+  302: require('../assets/images/flashcards/tle_mute_mic.gif'),
+  303: require('../assets/images/flashcards/tle_meeting_link.gif'),
+  304: require('../assets/images/flashcards/tle_password_protection.gif'),
+  305: require('../assets/images/flashcards/tle_visual_clarity.gif'),
+  306: require('../assets/images/flashcards/tle_chat_etiquette.gif'),
+  // Araling Panlipunan (Authentic Historical Artifacts, Paintings & Photographs)
+  401: require('../assets/images/flashcards/ap_katipunan_flag.png'),
+  402: require('../assets/images/flashcards/ap_andres_bonifacio.jpg'),
+  403: require('../assets/images/flashcards/ap_sanduguan.jpg'),
+  404: require('../assets/images/flashcards/ap_kartilya.jpg'),
+  405: require('../assets/images/flashcards/ap_kalayaan.png'),
+  406: require('../assets/images/flashcards/ap_gregoria_de_jesus.jpg'),
+};
+
+const FLASHCARD_CONTENT: Record<number, { example: string }> = {
+  // Story Grammar
+  1: {
+    example: 'Rad is a cheerful student who loves flying his red kite.',
+  },
+  2: {
+    example: 'Rad walks across a sunny grassy hill with an oak tree on a breezy afternoon.',
+  },
+  3: {
+    example: "Rad's red kite gets stuck high in the oak tree branches.",
+  },
+  4: {
+    example: 'A friendly helper uses a ladder to rescue the kite and safely returns it to Rad.',
+  },
+  5: {
+    example: 'First, Rad crafts his red kite at his wooden work table.',
+  },
+  6: {
+    example: 'Finally, Rad runs joyfully across the hill as his red kite soars high in the sky.',
+  },
+  // Mathematics
+  201: {
+    example: 'The blue triangle slides 4 units to the right in a straight line.',
+  },
+  202: {
+    example: 'The shape flips across the red mirror line to create an opposite matching image.',
+  },
+  203: {
+    example: 'The purple shape turns 90 degrees clockwise around the red center point.',
+  },
+  204: {
+    example: 'The dashed center line folds the shape into two matching halves.',
+  },
+  205: {
+    example: 'Shape A and Shape B are congruent because they have the exact same size and shape.',
+  },
+  206: {
+    example: 'The horizontal X-axis and vertical Y-axis help us find the exact position of points.',
+  },
+  // Technology and Livelihood Education
+  301: {
+    example: 'Slide your webcam privacy shutter closed to protect your private room.',
+  },
+  302: {
+    example: 'Always mute your microphone when the teacher or classmates are speaking.',
+  },
+  303: {
+    example: 'Only share the meeting link with trusted school classmates.',
+  },
+  304: {
+    example: 'Keep your secret password protected and confidential.',
+  },
+  305: {
+    example: 'Face the bright front light so your hand signs are clear and easy to see.',
+  },
+  306: {
+    example: 'Use the chat box only for polite and lesson-related questions.',
+  },
+  // Araling Panlipunan
+  401: {
+    example: 'The Katipunan united Filipinos under a common vision of liberty.',
+  },
+  402: {
+    example: 'Andres Bonifacio inspired the people with his courage and love of country.',
+  },
+  403: {
+    example: 'Katipuneros performed the Sanduguan to pledge their lives for freedom.',
+  },
+  404: {
+    example: 'The Kartilya taught that all human beings are equal regardless of wealth.',
+  },
+  405: {
+    example: 'The supreme goal of the Katipuneros was to achieve Kalayaan for the country.',
+  },
+  406: {
+    example: "Gregoria de Jesus led the women's chapter and protected the Katipunan seal.",
+  },
+};
 
 interface Flashcard {
   id: number;
@@ -34,7 +147,18 @@ export default function FlashcardsScreen() {
 
   const flipAnim = useRef(new Animated.Value(0)).current;
 
+  const recordFlashcardReview = async () => {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    try {
+      const raw = await AsyncStorage.getItem(`@dhh_flashcards_count_${today}`);
+      const nextVal = (parseInt(raw || '0', 10) || 0) + 1;
+      await AsyncStorage.setItem(`@dhh_flashcards_count_${today}`, String(nextVal));
+    } catch {}
+  };
+
   const handleFlipCard = () => {
+    recordFlashcardReview();
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     } catch {}
@@ -78,6 +202,18 @@ export default function FlashcardsScreen() {
     outputRange: [0, 1],
   });
 
+  const normalizeCards = (rawCards: Flashcard[]) => {
+    return rawCards.map((c) => {
+      if (FLASHCARD_CONTENT[c.id]) {
+        return {
+          ...c,
+          example: FLASHCARD_CONTENT[c.id].example,
+        };
+      }
+      return c;
+    });
+  };
+
   const fetchCards = async (topicId: string) => {
     setLoading(true);
     setCurrentIndex(0);
@@ -87,7 +223,7 @@ export default function FlashcardsScreen() {
       const res = await fetch(`${API_URL}/flashcards/${topicId}`);
       if (res.ok) {
         const data = await res.json();
-        const loadedCards = data.cards || [];
+        const loadedCards = normalizeCards(data.cards || []);
         setCards(loadedCards);
         if (loadedCards.length > 0) {
           await cacheFlashcards(topicId, loadedCards);
@@ -99,7 +235,7 @@ export default function FlashcardsScreen() {
       console.log('Error fetching flashcards, falling back to cache (offline):', err);
       const cached = await getCachedFlashcards(topicId);
       if (cached && cached.length > 0) {
-        setCards(cached);
+        setCards(normalizeCards(cached));
       }
     } finally {
       setLoading(false);
@@ -142,7 +278,7 @@ export default function FlashcardsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -173,11 +309,6 @@ export default function FlashcardsScreen() {
                 ]}
                 onPress={() => setSelectedTopic(t.id)}
               >
-                <Ionicons
-                  name={t.icon as any}
-                  size={16}
-                  color={isActive ? 'white' : t.color}
-                />
                 <Text style={[styles.topicChipText, isActive && styles.topicChipTextActive]}>
                   {t.name}
                 </Text>
@@ -229,9 +360,20 @@ export default function FlashcardsScreen() {
                 ]}
               >
                 <View style={styles.cardSideContainer}>
-                  <View style={[styles.iconWrapper, { backgroundColor: `${currentCard.color}15` }]}>
-                    <Ionicons name={currentCard.icon as any} size={48} color={currentCard.color} />
-                  </View>
+                  {FLASHCARD_IMAGES[currentCard.id] ? (
+                    <View style={styles.cardImageContainer}>
+                      <Image
+                        source={FLASHCARD_IMAGES[currentCard.id]}
+                        style={styles.cardIllustration}
+                        contentFit={selectedTopic === 'araling-panlipunan' ? 'contain' : 'cover'}
+                        autoplay={true}
+                      />
+                    </View>
+                  ) : (
+                    <View style={[styles.iconWrapper, { backgroundColor: `${currentCard.color}15` }]}>
+                      <Ionicons name={currentCard.icon as any} size={48} color={currentCard.color} />
+                    </View>
+                  )}
                   <Text style={styles.cardTerm}>{currentCard.term}</Text>
                   <Text style={styles.cardFrontHint}>Tap to reveal ASL Gloss & Definition</Text>
                   <View style={styles.flipPrompt}>
@@ -266,7 +408,7 @@ export default function FlashcardsScreen() {
 
                   <View style={styles.exampleBox}>
                     <Text style={styles.exampleLabel}>Example Sentence:</Text>
-                    <Text style={styles.exampleText}>"{currentCard.example}"</Text>
+                    <Text style={styles.exampleText}>"{FLASHCARD_CONTENT[currentCard.id]?.example || currentCard.example}"</Text>
                   </View>
 
                   <View style={[styles.flipPrompt, { marginTop: 12 }]}>
@@ -387,13 +529,13 @@ const styles = StyleSheet.create({
   cardCounterText: { fontSize: 13, fontWeight: '600', color: '#9CA3AF' },
   cardContainer: {
     width: '100%',
-    minHeight: 340,
+    minHeight: 390,
     marginBottom: 24,
     position: 'relative',
   },
   flashcard: {
     width: '100%',
-    minHeight: 340,
+    minHeight: 390,
     borderRadius: 24,
     padding: 24,
     backgroundColor: 'white',
@@ -418,6 +560,20 @@ const styles = StyleSheet.create({
   flashcardFront: { borderColor: '#EDE9FE' },
   flashcardBack: { borderColor: '#DDD6FE', backgroundColor: '#FAF5FF' },
   cardSideContainer: { width: '100%', alignItems: 'center', justifyContent: 'center' },
+  cardImageContainer: {
+    width: 220,
+    height: 180,
+    borderRadius: 18,
+    overflow: 'hidden',
+    marginBottom: 16,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+  },
+  cardIllustration: {
+    width: '100%',
+    height: '100%',
+  },
   iconWrapper: {
     width: 90,
     height: 90,

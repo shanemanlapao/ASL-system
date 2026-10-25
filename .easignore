@@ -1,0 +1,15 @@
+# EAS Build ignore file
+node_modules/
+.expo/
+dist/
+web-build/
+deploy.zip
+*.zip
+scratch/
+assets/uploads/
+server.py
+requirements.txt
+__pycache__/
+*.log
+.git/
+.venv/

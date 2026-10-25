@@ -18,29 +18,22 @@ import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
-import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../context/AuthContext";
-import { API_URL } from "../../context/config";
+import { API_URL, resolveMediaUrl } from "../../context/config";
 import { COLORS } from "../../context/theme";
-
-const STORAGE_KEYS = {
-  ASL_DEFAULT: "@dhh_asl_default",
-  HAPTICS: "@dhh_haptics_enabled",
-  HIGH_CONTRAST: "@dhh_high_contrast",
-};
+import { useAccessibility } from "../../context/AccessibilityContext";
 
 export default function SettingsScreen() {
   const { user, setUser, logout } = useAuth();
   const userId = user?.id || 1;
 
-  // Avatar State & 24h Cooldown
-  const [uploadingAvatar, setUploadingAvatar] = useState(false);
-  const [avatarStatus, setAvatarStatus] = useState<any>(null);
-
-  // DHH Accessibility Preference Toggles
-  const [aslDefault, setAslDefault] = useState(false);
-  const [hapticsEnabled, setHapticsEnabled] = useState(true);
-  const [highContrast, setHighContrast] = useState(false);
+  // Global Accessibility Preferences
+  const {
+    hapticsEnabled,
+    highContrast,
+    setHapticsEnabled,
+    setHighContrast,
+  } = useAccessibility();
 
   // Profile Edit Modal State
   const [profileModalVisible, setProfileModalVisible] = useState(false);
@@ -58,45 +51,6 @@ export default function SettingsScreen() {
   const [helpModalVisible, setHelpModalVisible] = useState(false);
   const [permissionModalVisible, setPermissionModalVisible] = useState(false);
 
-  // Load saved preferences on mount
-  useEffect(() => {
-    const loadPreferences = async () => {
-      try {
-        const [savedAsl, savedHaptics, savedContrast] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.ASL_DEFAULT),
-          AsyncStorage.getItem(STORAGE_KEYS.HAPTICS),
-          AsyncStorage.getItem(STORAGE_KEYS.HIGH_CONTRAST),
-        ]);
-        if (savedAsl !== null) setAslDefault(savedAsl === "true");
-        if (savedHaptics !== null) setHapticsEnabled(savedHaptics === "true");
-        if (savedContrast !== null) setHighContrast(savedContrast === "true");
-      } catch (err) {
-        console.log("Could not load preferences:", err);
-      }
-    };
-    loadPreferences();
-    fetchAvatarStatus();
-  }, [userId]);
-
-  const fetchAvatarStatus = async () => {
-    try {
-      const res = await fetch(`${API_URL}/student/${userId}/avatar-status`);
-      if (res.ok) {
-        const data = await res.json();
-        setAvatarStatus(data);
-        if (data.avatar_url && data.avatar_url !== user?.avatar_url && user) {
-          setUser({
-            ...user,
-            avatar_url: data.avatar_url,
-            last_avatar_changed_at: data.last_avatar_changed_at,
-          });
-        }
-      }
-    } catch (err) {
-      console.log("Error fetching avatar status:", err);
-    }
-  };
-
   const triggerHaptic = () => {
     if (hapticsEnabled) {
       try {
@@ -105,32 +59,18 @@ export default function SettingsScreen() {
     }
   };
 
-  const handleToggleAsl = async (val: boolean) => {
-    triggerHaptic();
-    setAslDefault(val);
-    try {
-      await AsyncStorage.setItem(STORAGE_KEYS.ASL_DEFAULT, String(val));
-    } catch {}
-  };
-
-  const handleToggleHaptics = async (val: boolean) => {
+  const handleToggleHaptics = (val: boolean) => {
     if (val) {
       try {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
       } catch {}
     }
     setHapticsEnabled(val);
-    try {
-      await AsyncStorage.setItem(STORAGE_KEYS.HAPTICS, String(val));
-    } catch {}
   };
 
-  const handleToggleContrast = async (val: boolean) => {
+  const handleToggleContrast = (val: boolean) => {
     triggerHaptic();
     setHighContrast(val);
-    try {
-      await AsyncStorage.setItem(STORAGE_KEYS.HIGH_CONTRAST, String(val));
-    } catch {}
   };
 
   const showAlert = (title: string, msg: string) => {
@@ -138,81 +78,7 @@ export default function SettingsScreen() {
     else Alert.alert(title, msg);
   };
 
-  // Avatar Picker & Upload with 24-hour rate limit check
-  const handlePickAvatar = async () => {
-    // 1. Check 24-hour cooldown
-    if (avatarStatus && !avatarStatus.can_change) {
-      const remainingSec = avatarStatus.remaining_seconds || 0;
-      const hours = Math.floor(remainingSec / 3600);
-      const minutes = Math.floor((remainingSec % 3600) / 60);
-      showAlert(
-        "Picture Locked (24-Hour Cooldown)",
-        `You can only change your profile picture once every 24 hours to prevent frequent updates.\n\nYou can change it again in ${hours > 0 ? `${hours}h ` : ""}${minutes}m.`
-      );
-      return;
-    }
 
-    // 2. Request permission
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== "granted") {
-        showAlert(
-          "Permission Required",
-          "Please grant camera roll permissions to select a profile picture."
-        );
-        return;
-      }
-
-      // 3. Open image picker
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.8,
-      });
-
-      if (result.canceled || !result.assets || !result.assets[0]) {
-        return;
-      }
-
-      const asset = result.assets[0];
-      setUploadingAvatar(true);
-
-      const fetchRes = await fetch(asset.uri);
-      const blob = await fetchRes.blob();
-      const filename = asset.fileName || asset.uri.split("/").pop() || "avatar.jpg";
-
-      const formData = new FormData();
-      formData.append("file", blob, filename);
-
-      const res = await fetch(`${API_URL}/student/${userId}/upload-avatar`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail || "Upload failed.");
-      }
-
-      if (user) {
-        setUser({
-          ...user,
-          avatar_url: data.avatar_url,
-          last_avatar_changed_at: data.last_avatar_changed_at,
-        });
-      }
-
-      showAlert(
-        "Profile Picture Updated!",
-        "Your new picture is now visible on your Home screen, and to your Teacher and Admin.\n\nNote: It is now set for 24 hours."
-      );
-      fetchAvatarStatus();
-    } catch (err: any) {
-      showAlert("Upload Error", err.message || "Could not upload profile picture.");
-    } finally {
-      setUploadingAvatar(false);
-    }
-  };
 
   const handleUpdateProfile = async () => {
     if (!newName.trim()) {
@@ -249,8 +115,8 @@ export default function SettingsScreen() {
       showAlert("Error", "New passwords do not match.");
       return;
     }
-    if (newPassword.length < 4) {
-      showAlert("Error", "New password must be at least 4 characters.");
+    if (newPassword.length < 6) {
+      showAlert("Error", "New password must be at least 6 characters.");
       return;
     }
     setChangingPassword(true);
@@ -336,9 +202,6 @@ export default function SettingsScreen() {
     </TouchableOpacity>
   );
 
-  const displayAvatarUri = user?.avatar_url || avatarStatus?.avatar_url;
-  const isCooldownActive = avatarStatus && !avatarStatus.can_change;
-
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <ScrollView
@@ -351,41 +214,13 @@ export default function SettingsScreen() {
           <Text style={styles.headerSubtitle}>Customize your learning experience</Text>
         </View>
 
-        {/* Student Profile Card with Editable Avatar */}
+        {/* Student Profile Card */}
         <View style={styles.profileCard}>
-          {/* Avatar with Camera badge */}
-          <TouchableOpacity
-            style={styles.avatarWrapper}
-            onPress={handlePickAvatar}
-            disabled={uploadingAvatar}
-            activeOpacity={0.8}
-          >
-            <View style={styles.avatarCircle}>
-              {uploadingAvatar ? (
-                <ActivityIndicator color="#FFFFFF" size="small" />
-              ) : displayAvatarUri ? (
-                <Image source={{ uri: displayAvatarUri }} style={styles.avatarImage} />
-              ) : (
-                <Text style={styles.avatarLetter}>
-                  {(user?.name || "Student").charAt(0).toUpperCase()}
-                </Text>
-              )}
-            </View>
-
-            {/* Small camera/lock badge on avatar */}
-            <View
-              style={[
-                styles.cameraBadge,
-                isCooldownActive ? styles.cameraBadgeLocked : styles.cameraBadgeActive,
-              ]}
-            >
-              <Ionicons
-                name={isCooldownActive ? "lock-closed" : "camera"}
-                size={11}
-                color="#FFFFFF"
-              />
-            </View>
-          </TouchableOpacity>
+          <View style={styles.avatarCircle}>
+            <Text style={styles.avatarLetter}>
+              {(user?.name || "Student").charAt(0).toUpperCase()}
+            </Text>
+          </View>
 
           {/* Profile Name */}
           <View style={styles.profileInfo}>
@@ -398,28 +233,9 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Sign Language & Visual Preferences */}
-        <Text style={styles.sectionTitle}>SIGN LANGUAGE & DISPLAY</Text>
+        {/* Accessibility & Visual Preferences */}
+        <Text style={styles.sectionTitle}>ACCESSIBILITY & DISPLAY</Text>
         <View style={styles.sectionCard}>
-          {/* ASL Default Toggle */}
-          <View style={[styles.settingItem, styles.settingItemBorder]}>
-            <View style={[styles.iconContainer, { backgroundColor: COLORS.primaryLight }]}>
-              <Ionicons name="hand-left" size={20} color={COLORS.primary} />
-            </View>
-            <View style={styles.settingTextContainer}>
-              <Text style={styles.settingTitle}>Use Sign Language First</Text>
-              <Text style={styles.settingSubtitle}>
-                Show quiz questions in Sign Language order
-              </Text>
-            </View>
-            <Switch
-              value={aslDefault}
-              onValueChange={handleToggleAsl}
-              trackColor={{ false: "#E2E8F0", true: COLORS.primaryBorder }}
-              thumbColor={aslDefault ? COLORS.primary : "#FFFFFF"}
-            />
-          </View>
-
           {/* Haptic Vibration Toggle */}
           <View style={[styles.settingItem, styles.settingItemBorder]}>
             <View style={[styles.iconContainer, { backgroundColor: "#EEF2FF" }]}>
@@ -681,7 +497,7 @@ export default function SettingsScreen() {
               style={styles.modalInput}
               value={newPassword}
               onChangeText={setNewPassword}
-              placeholder="At least 4 characters"
+              placeholder="At least 6 characters"
               placeholderTextColor="#94A3B8"
               secureTextEntry
             />

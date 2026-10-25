@@ -56,12 +56,9 @@ export default function LoginScreen() {
         setLoginError(data.detail || "Invalid username or password.");
         return;
       }
-      if (Platform.OS === "web" && data.user?.role === "student") {
-        setLoginError("Student access is restricted to the Android Mobile App. Please use your Android device.");
-        setLoading(false);
-        return;
-      }
-      if (Platform.OS !== "web" && (data.user?.role === "teacher" || data.user?.role === "admin")) {
+      // In production, teacher and admin access is restricted to Web Portal.
+      // During local development (__DEV__), allow logging in on any platform for testing before deployment.
+      if (!__DEV__ && Platform.OS !== "web" && (data.user?.role === "teacher" || data.user?.role === "admin")) {
         setLoginError("Teacher & Admin access is restricted to the Web Portal. Please log in using a web browser.");
         setLoading(false);
         return;

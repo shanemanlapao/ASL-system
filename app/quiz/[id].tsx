@@ -6,15 +6,20 @@ import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, router } from "expo-router";
 import { useSubjects } from "../../context/SubjectsContext";
 import { useAuth } from "../../context/AuthContext";
-import { API_URL } from "../../context/config";
+import { API_URL, resolveMediaUrl } from "../../context/config";
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS } from "../../context/theme";
+import { useAccessibility } from "../../context/AccessibilityContext";
 import Confetti from "../../components/Confetti";
 import {
   cacheQuizSession,
   getCachedQuizSession,
+  getCachedTopicQuizzes,
   enqueuePendingQuiz,
   updateLocalKCMastery,
   StudentKCMastery,
+  addLocalStars,
+  saveLocalTotalStars,
 } from "../../context/OfflineCache";
 import {
   getEliminationScaffold,
@@ -53,6 +58,7 @@ export default function QuizScreen() {
     }
   }
 
+  const { hapticsEnabled, highContrast } = useAccessibility();
   const [isDeafEnglish, setIsDeafEnglish] = useState<boolean>(deafEnglish === 'true');
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [selectedOptionIndex, setSelectedOptionIndex] = useState<number | null>(null);
@@ -89,6 +95,7 @@ export default function QuizScreen() {
   // Timers for tracking time spent per question
   const questionStartTimeRef = useRef<number>(Date.now());
   const totalQuizStartTimeRef = useRef<number>(Date.now());
+  const resolvedQuizIdRef = useRef<string | number | null>(null);
 
   // Matching mode interactive states
   const [selectedLeft, setSelectedLeft] = useState<string | null>(null);
@@ -316,42 +323,159 @@ export default function QuizScreen() {
   };
 
 
-  const startQuizSession = async () => {
+  const getActiveQuizStorageKey = (qId: string | number) => `@brightpath_active_quiz_${userId}_${qId}`;
+
+  const persistQuizProgress = async (
+    qIndex: number,
+    currentScore: number,
+    answers: QuestionAnswerRecord[],
+    questionsList = quizQuestions
+  ) => {
+    const qId = resolvedQuizIdRef.current || paramQuizId;
+    if (!qId || !questionsList || questionsList.length === 0) return;
+    try {
+      await AsyncStorage.setItem(
+        getActiveQuizStorageKey(qId),
+        JSON.stringify({
+          targetQuizId: qId,
+          attemptId,
+          difficulty,
+          currentQuestionIndex: qIndex,
+          score: currentScore,
+          answersRecord: answers,
+          quizQuestions: questionsList,
+          timestamp: Date.now(),
+        })
+      );
+    } catch {}
+  };
+
+  const clearQuizProgress = (qId?: string | number | null) => {
+    const idToClear = qId || resolvedQuizIdRef.current || paramQuizId;
+    if (idToClear) {
+      AsyncStorage.removeItem(getActiveQuizStorageKey(idToClear)).catch(() => {});
+    }
+  };
+
+  const startQuizSession = async (forceRestart = false) => {
     setLoading(true);
     setLockedError(null);
     setIsFinished(false);
-    setScore(0);
-    setCurrentQuestionIndex(0);
-    setAnswersRecord([]);
+    setSelectedOptionIndex(null);
+    setIsAnswered(false);
+    setShowHint(false);
+    setHintUsed(false);
+    setHintText(null);
+    setEliminatedOptionIdx(null);
+    setEliminatedOptionInfo(null);
+    setSelectedLeft(null);
+    setSelectedRight(null);
+    setCurrentMatchedPairs([]);
+    setMatchingFeedback(null);
+    setWrongFeedbackVisible(false);
+    setWrongFeedbackData(null);
+    setShowPraisePop(false);
+    setAslDrawerVisible(false);
+    setAslResult('');
     setCompletionResult(null);
     setBktMasteryResult(null);
     setIsOfflineSaved(false);
     totalQuizStartTimeRef.current = Date.now();
 
-    try {
-      // 1. Get quiz ID if not passed directly
-      let targetQuizId = paramQuizId;
+    // 1. Resolve target quiz ID (online or offline)
+    let targetQuizId = resolvedQuizIdRef.current || paramQuizId;
+    if (!targetQuizId && (mode === 'daily' || (!lessonId && /^\d+$/.test(String(id || ''))))) {
+      targetQuizId = id;
+    }
 
-      if (!targetQuizId) {
+    if (!targetQuizId) {
+      try {
         let res;
         if (lessonId) {
           res = await fetch(`${API_URL}/quizzes/lesson/${lessonId}`);
         } else {
           res = await fetch(`${API_URL}/quizzes/${id}`);
         }
-        if (res.ok) {
+        if (res?.ok) {
           const data = await res.json();
-          const quizObj = Array.isArray(data) ? data[data.length - 1] : data;
+          const targetDiff = (difficulty || (paramDiff as string) || 'easy').toLowerCase();
+          const quizObj = Array.isArray(data)
+            ? (data.find((q: any) => q.difficulty?.toLowerCase() === targetDiff) || data[0])
+            : data;
           if (quizObj) targetQuizId = quizObj.id;
         }
+      } catch (lookupErr) {
+        console.log('Online quiz lookup failed, checking cache:', lookupErr);
       }
+    }
 
+    // Offline lookup fallback for targetQuizId
+    if (!targetQuizId && lessonId) {
+      const cachedByLesson = await getCachedQuizSession(`lesson_${lessonId}`);
+      if (cachedByLesson?.id) {
+        targetQuizId = cachedByLesson.id;
+      }
+    }
+    if (!targetQuizId && id) {
+      const topicQuizzes = await getCachedTopicQuizzes(String(id));
+      if (Array.isArray(topicQuizzes) && topicQuizzes.length > 0) {
+        const targetDiff = (difficulty || (paramDiff as string) || 'easy').toLowerCase();
+        const match = topicQuizzes.find((q: any) =>
+          (lessonId ? q.lesson_id === Number(lessonId) : true) &&
+          (!targetDiff || (q.difficulty || '').toLowerCase() === targetDiff)
+        ) || topicQuizzes[0];
+        if (match?.id) targetQuizId = match.id;
+      }
+    }
+
+    if (targetQuizId) {
+      resolvedQuizIdRef.current = targetQuizId;
+    }
+
+    // 2. Check for persistent in-progress quiz state (if not force-restarted)
+    if (!forceRestart && targetQuizId) {
+      try {
+        const savedProgressRaw = await AsyncStorage.getItem(getActiveQuizStorageKey(targetQuizId));
+        if (savedProgressRaw) {
+          const saved = JSON.parse(savedProgressRaw);
+          if (
+            saved &&
+            Array.isArray(saved.quizQuestions) &&
+            saved.quizQuestions.length > 0 &&
+            typeof saved.currentQuestionIndex === 'number' &&
+            saved.currentQuestionIndex < saved.quizQuestions.length
+          ) {
+            setAttemptId(saved.attemptId || null);
+            setDifficulty(saved.difficulty || (paramDiff as string) || 'easy');
+            setQuizQuestions(saved.quizQuestions);
+            setCurrentQuestionIndex(saved.currentQuestionIndex);
+            setScore(saved.score || 0);
+            setAnswersRecord(saved.answersRecord || []);
+            setQuizTitle(`${(saved.difficulty || 'QUIZ').toUpperCase()} Quiz`);
+            questionStartTimeRef.current = Date.now();
+            setLockedError(null);
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (restoreErr) {
+        console.log('Error restoring saved quiz progress:', restoreErr);
+      }
+    }
+
+    // Reset progress tracking if starting a fresh attempt
+    setScore(0);
+    setCurrentQuestionIndex(0);
+    setAnswersRecord([]);
+
+    try {
       if (!targetQuizId) {
         throw new Error("No quiz found for this lesson.");
       }
 
-      // 2. Call AI Session endpoint (randomized 10 questions + lock check)
-      const sessionRes = await fetch(`${API_URL}/quiz/session/${targetQuizId}?user_id=${userId}`);
+      // 3. Call AI Session endpoint (randomized 10 questions + lock check)
+      const sessionUrl = `${API_URL}/quiz/session/${targetQuizId}?user_id=${userId}${mode === 'daily' ? '&mode=daily' : ''}`;
+      const sessionRes = await fetch(sessionUrl);
 
       if (sessionRes.status === 403) {
         const errorData = await sessionRes.json();
@@ -367,22 +491,25 @@ export default function QuizScreen() {
 
       // Cache session for offline reuse
       await cacheQuizSession(targetQuizId as string, sessionData);
+      if (lessonId) {
+        await cacheQuizSession(`lesson_${lessonId}`, sessionData);
+      }
 
       const mapped = sessionData.questions.map((q: any) => ({
         id: q.id,
         question: q.question_text,
-        deafQuestion: q.question_text.toUpperCase(),
+        deafQuestion: (q.question_text || '').toUpperCase(),
         question_type: q.question_type || 'descriptive',
         image_url: q.image_url,
         options: (q.options || []).map((opt: string, idx: number) => ({
           id: String.fromCharCode(65 + idx),
           text: opt,
-          deafText: opt.toUpperCase()
+          deafText: (opt || '').toUpperCase(),
         })),
         correctOptionId: String.fromCharCode(65 + q.correct_option_index),
         matching_pairs: (q.matching_pairs || []).map((p: any) => ({
           left: p.left || p.left_item || '',
-          right: p.right || p.right_item || ''
+          right: p.right || p.right_item || '',
         })),
         hint: q.hint || "",
         deafHint: (q.hint || "").toUpperCase(),
@@ -390,45 +517,60 @@ export default function QuizScreen() {
       }));
 
       setQuizQuestions(mapped);
-      setQuizTitle(`${difficulty.toUpperCase()} Quiz`);
+      setQuizTitle(`${(sessionData.difficulty || 'QUIZ').toUpperCase()} Quiz`);
       questionStartTimeRef.current = Date.now();
+      persistQuizProgress(0, 0, [], mapped);
     } catch (err: any) {
       console.log('Error starting quiz session, checking cache (offline):', err);
 
       // Offline fallback: load cached session or topic quiz
       let loaded = false;
-      const targetQuizId = paramQuizId;
-      if (targetQuizId) {
-        const cachedSession = await getCachedQuizSession(targetQuizId as string);
-        if (cachedSession?.questions?.length) {
-          setAttemptId(cachedSession.attempt_id || null);
-          setDifficulty(cachedSession.difficulty || (paramDiff as string) || "easy");
-          const mapped = cachedSession.questions.map((q: any) => ({
-            id: q.id,
-            question: q.question_text,
-            deafQuestion: q.question_text.toUpperCase(),
-            question_type: q.question_type || 'descriptive',
-            image_url: q.image_url,
-            options: (q.options || []).map((opt: string, idx: number) => ({
-              id: String.fromCharCode(65 + idx),
-              text: opt,
-              deafText: opt.toUpperCase()
-            })),
-            correctOptionId: String.fromCharCode(65 + (q.correct_option_index ?? 0)),
-            matching_pairs: (q.matching_pairs || []).map((p: any) => ({
-              left: p.left || p.left_item || '',
-              right: p.right || p.right_item || ''
-            })),
-            hint: q.hint || "",
-            deafHint: (q.hint || "").toUpperCase(),
-            knowledge_component: q.knowledge_component || 'reading_comprehension',
-          }));
-          setQuizQuestions(mapped);
-          setQuizTitle(`${(cachedSession.difficulty || 'QUIZ').toUpperCase()} Quiz (Offline)`);
-          questionStartTimeRef.current = Date.now();
-          setLockedError(null);
-          loaded = true;
+      let cachedSession = targetQuizId ? await getCachedQuizSession(targetQuizId as string) : null;
+      if (!cachedSession && lessonId) {
+        cachedSession = await getCachedQuizSession(`lesson_${lessonId}`);
+      }
+      if (!cachedSession && id) {
+        const topicQuizzes = await getCachedTopicQuizzes(String(id));
+        if (Array.isArray(topicQuizzes) && topicQuizzes.length > 0) {
+          const targetDiff = (difficulty || (paramDiff as string) || 'easy').toLowerCase();
+          cachedSession = topicQuizzes.find((q: any) =>
+            (lessonId ? q.lesson_id === Number(lessonId) : true) &&
+            (!targetDiff || (q.difficulty || '').toLowerCase() === targetDiff)
+          ) || topicQuizzes[0];
         }
+      }
+
+      if (cachedSession?.questions?.length) {
+        setAttemptId(cachedSession.attempt_id || null);
+        const resolvedDiff = cachedSession.difficulty || (paramDiff as string) || "easy";
+        setDifficulty(resolvedDiff);
+        const questionsPool = Array.isArray(cachedSession.questions) ? cachedSession.questions.slice(0, 10) : [];
+        const mapped = questionsPool.map((q: any) => ({
+          id: q.id,
+          question: q.question_text,
+          deafQuestion: (q.question_text || '').toUpperCase(),
+          question_type: q.question_type || 'descriptive',
+          image_url: q.image_url,
+          options: (q.options || []).map((opt: string, idx: number) => ({
+            id: String.fromCharCode(65 + idx),
+            text: opt,
+            deafText: (opt || '').toUpperCase(),
+          })),
+          correctOptionId: String.fromCharCode(65 + (q.correct_option_index ?? 0)),
+          matching_pairs: (q.matching_pairs || []).map((p: any) => ({
+            left: p.left || p.left_item || '',
+            right: p.right || p.right_item || '',
+          })),
+          hint: q.hint || "",
+          deafHint: (q.hint || "").toUpperCase(),
+          knowledge_component: q.knowledge_component || 'reading_comprehension',
+        }));
+        setQuizQuestions(mapped);
+        setQuizTitle(`${resolvedDiff.toUpperCase()} Quiz (Offline)`);
+        questionStartTimeRef.current = Date.now();
+        setLockedError(null);
+        loaded = true;
+        persistQuizProgress(0, 0, [], mapped);
       }
 
       if (!loaded && topic?.quiz?.questions?.length) {
@@ -437,6 +579,7 @@ export default function QuizScreen() {
         questionStartTimeRef.current = Date.now();
         setLockedError(null);
         loaded = true;
+        persistQuizProgress(0, 0, [], topic.quiz.questions);
       }
 
       if (!loaded) {
@@ -483,7 +626,10 @@ export default function QuizScreen() {
     const totalQ = quizQuestions.length > 0 ? quizQuestions.length : 1;
     const accuracyPct = Math.round((finalScore / totalQ) * 100);
     const isPassed = accuracyPct >= 70;
-    const targetQuizId = Number(paramQuizId) || 1;
+    const targetQuizId = Number(resolvedQuizIdRef.current || paramQuizId) || 1;
+
+    // Clear saved in-progress quiz since attempt is finished
+    clearQuizProgress(targetQuizId);
 
     try {
       if (attemptId) {
@@ -502,6 +648,10 @@ export default function QuizScreen() {
           const result = await res.json();
           setCompletionResult(result);
           setIsOfflineSaved(false);
+
+          if (result.stars_earned && result.stars_earned > 0) {
+            await addLocalStars(userId, result.stars_earned);
+          }
 
           // Update local BKT mastery cache
           let latestKCMastery: StudentKCMastery | null = null;
@@ -557,6 +707,11 @@ export default function QuizScreen() {
       const starRate = starRates[(difficulty || 'easy').toLowerCase()] || 3;
       const starsEarned = isPassed ? (finalScore * starRate) : 0;
 
+      // Add stars locally so they reflect immediately even offline
+      if (starsEarned > 0) {
+        await addLocalStars(userId, starsEarned);
+      }
+
       // Real-time edge BKT update while offline
       let latestKCMastery: StudentKCMastery | null = null;
       for (const ans of finalAnswers) {
@@ -597,14 +752,18 @@ export default function QuizScreen() {
       newScore = score + 1;
       setScore(newScore);
       triggerPraisePop();
-      try {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      } catch {}
+      if (hapticsEnabled) {
+        try {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        } catch {}
+      }
     } else {
       triggerShake();
-      try {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
-      } catch {}
+      if (hapticsEnabled) {
+        try {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+        } catch {}
+      }
     }
 
     const newAnswer: QuestionAnswerRecord = {
@@ -625,12 +784,17 @@ export default function QuizScreen() {
         setHintText(null);
         setHintUsed(false);
         if (currentQuestionIndex < quizQuestions.length - 1) {
-          setCurrentQuestionIndex(prev => prev + 1);
+          const nextIndex = currentQuestionIndex + 1;
+          setCurrentQuestionIndex(nextIndex);
+          persistQuizProgress(nextIndex, newScore, updatedAnswers);
           setSelectedOptionIndex(null);
           setIsAnswered(false);
           setShowHint(false);
         } else {
           setIsFinished(true);
+          setSelectedOptionIndex(null);
+          setIsAnswered(false);
+          setShowHint(false);
           submitQuizResults(newScore, updatedAnswers);
         }
       }, 2000);
@@ -677,12 +841,17 @@ export default function QuizScreen() {
     setHintUsed(false);
 
     if (currentQuestionIndex < quizQuestions.length - 1) {
-      setCurrentQuestionIndex(prev => prev + 1);
+      const nextIndex = currentQuestionIndex + 1;
+      setCurrentQuestionIndex(nextIndex);
+      persistQuizProgress(nextIndex, pendingScore, pendingAnswers);
       setSelectedOptionIndex(null);
       setIsAnswered(false);
       setShowHint(false);
     } else {
       setIsFinished(true);
+      setSelectedOptionIndex(null);
+      setIsAnswered(false);
+      setShowHint(false);
       submitQuizResults(pendingScore, pendingAnswers);
     }
   };
@@ -726,11 +895,16 @@ export default function QuizScreen() {
         setTimeout(() => {
           setShowPraisePop(false);
           if (currentQuestionIndex < quizQuestions.length - 1) {
-            setCurrentQuestionIndex(prev => prev + 1);
+            const nextIndex = currentQuestionIndex + 1;
+            setCurrentQuestionIndex(nextIndex);
+            persistQuizProgress(nextIndex, newScore, updatedAnswers);
             setIsAnswered(false);
             setShowHint(false);
           } else {
             setIsFinished(true);
+            setSelectedOptionIndex(null);
+            setIsAnswered(false);
+            setShowHint(false);
             submitQuizResults(newScore, updatedAnswers);
           }
         }, 2000);
@@ -738,9 +912,11 @@ export default function QuizScreen() {
     } else {
       setMatchingFeedback('wrong');
       triggerShake();
-      try {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
-      } catch {}
+      if (hapticsEnabled) {
+        try {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+        } catch {}
+      }
       setTimeout(() => {
         setMatchingFeedback(null);
         setSelectedLeft(null);
@@ -751,7 +927,7 @@ export default function QuizScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color="#0284C7" />
           <Text style={{ marginTop: 10, color: '#6B7280' }}>Loading quiz questions...</Text>
@@ -763,7 +939,7 @@ export default function QuizScreen() {
   // Locked Quiz Screen
   if (lockedError) {
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.header}>
           <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color="#0284C7" />
@@ -799,7 +975,7 @@ export default function QuizScreen() {
     const earnedStars = completionResult?.stars_earned !== undefined ? completionResult.stars_earned : calculatedStars;
 
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         {passed && <Confetti count={65} />}
         <View style={styles.finishedContainer}>
           <Ionicons
@@ -886,7 +1062,8 @@ export default function QuizScreen() {
               activeOpacity={0.8}
               onPress={() => {
                 setAttemptCount(prev => prev + 1);
-                startQuizSession();
+                clearQuizProgress();
+                startQuizSession(true);
               }}
             >
               <Ionicons name="refresh" size={20} color={COLORS.primary} />
@@ -908,7 +1085,7 @@ export default function QuizScreen() {
 
   if (!currentQuestion) {
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.centerContainer}>
           <Text style={{ color: "#EF4444", fontSize: 16 }}>No questions available for this quiz.</Text>
           <TouchableOpacity style={[styles.doneButton, { marginTop: 16 }]} onPress={() => router.back()}>
@@ -925,7 +1102,7 @@ export default function QuizScreen() {
   const progressPercent = totalQuestions > 0 ? (currentQuestionNumber / totalQuestions) * 100 : 0;
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -962,14 +1139,14 @@ export default function QuizScreen() {
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
         {/* Question Card */}
-        <View style={styles.questionCard}>
+        <View style={[styles.questionCard, highContrast && { borderWidth: 2, borderColor: '#000000', backgroundColor: '#FFFFFF' }]}>
           {currentQuestion.image_url ? (
             <View style={styles.questionImageWrapper}>
-              <Image source={{ uri: currentQuestion.image_url }} style={styles.questionImage} resizeMode="contain" />
+              <Image source={{ uri: resolveMediaUrl(currentQuestion.image_url) }} style={styles.questionImage} resizeMode="contain" />
             </View>
           ) : null}
 
-          <Text style={styles.questionText}>
+          <Text style={[styles.questionText, highContrast && { color: '#000000', fontWeight: '900', fontSize: 19 }]}>
             {isDeafEnglish ? currentQuestion.deafQuestion : currentQuestion.question}
           </Text>
 
@@ -988,6 +1165,9 @@ export default function QuizScreen() {
                   if (isCorrect) optionStyle = styles.optionCorrect;
                   else if (isSelected) optionStyle = styles.optionWrong;
                 }
+                if (highContrast && !isAnswered && !isEliminated) {
+                  optionStyle = [optionStyle, { borderWidth: 2, borderColor: '#1E293B', backgroundColor: '#FFFFFF' }];
+                }
 
                 return (
                   <View
@@ -1002,12 +1182,12 @@ export default function QuizScreen() {
                       disabled={isAnswered || isEliminated}
                       onPress={() => handleSelectOption(idx)}
                     >
-                      <View style={[styles.optionLetterBox, isEliminated && styles.optionLetterBoxEliminated]}>
-                        <Text style={[styles.optionLetter, isEliminated && styles.optionLetterEliminated]}>
+                      <View style={[styles.optionLetterBox, isEliminated && styles.optionLetterBoxEliminated, highContrast && { backgroundColor: '#000000' }]}>
+                        <Text style={[styles.optionLetter, isEliminated && styles.optionLetterEliminated, highContrast && { color: '#FFFFFF', fontWeight: '900' }]}>
                           {option.id}
                         </Text>
                       </View>
-                      <Text style={[styles.optionText, isEliminated && styles.optionTextEliminated]}>
+                      <Text style={[styles.optionText, isEliminated && styles.optionTextEliminated, highContrast && { color: '#000000', fontWeight: '800' }]}>
                         {isDeafEnglish ? option.deafText : option.text}
                       </Text>
 

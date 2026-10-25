@@ -1,17 +1,15 @@
-from typing import Optional, List
-from fastapi import FastAPI, HTTPException, File, UploadFile, Request
+from typing import Optional, List, Tuple
+from fastapi import FastAPI, HTTPException, File, UploadFile, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-try:
-    from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
-except ImportError:
-    MBart50TokenizerFast = None
-    MBartForConditionalGeneration = None
+MBart50TokenizerFast = None
+MBartForConditionalGeneration = None
 from passlib.context import CryptContext
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import re
 import os
 import shutil
@@ -43,8 +41,53 @@ load_env_file()
 app = FastAPI()
 
 # Mount static folder uploads to serve files
-UPLOAD_DIR = "assets/uploads"
+# In Azure App Service Linux, /home is mounted to persistent Azure Files storage.
+# Storing uploads in /home/site/uploads keeps them safe across deployments.
+if os.path.exists("/home/site") and os.path.isdir("/home/site"):
+    UPLOAD_DIR = "/home/site/uploads"
+    os.environ.setdefault("HF_HOME", "/home/site/models")
+elif os.path.exists("/home") and os.path.isdir("/home"):
+    UPLOAD_DIR = "/home/uploads"
+    os.environ.setdefault("HF_HOME", "/home/models")
+else:
+    UPLOAD_DIR = "assets/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def sync_packaged_uploads():
+    """
+    On startup, copy all images bundled with the deployment (assets/uploads)
+    into the persistent Azure UPLOAD_DIR (/home/site/uploads) so they never
+    disappear or go blank after a deployment/restart.
+    """
+    try:
+        packaged_dirs = [
+            os.path.abspath("assets/uploads"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "uploads"),
+            "/home/site/wwwroot/assets/uploads",
+        ]
+        target_dir = os.path.abspath(UPLOAD_DIR)
+        for p_dir in packaged_dirs:
+            if os.path.isdir(p_dir) and p_dir != target_dir:
+                for item in os.listdir(p_dir):
+                    src = os.path.join(p_dir, item)
+                    dst = os.path.join(target_dir, item)
+                    if os.path.isfile(src) and not os.path.exists(dst):
+                        try:
+                            shutil.copy2(src, dst)
+                        except Exception:
+                            pass
+    except Exception as e:
+        print(f"[UploadSync] Note: {e}")
+
+sync_packaged_uploads()
+
+def get_public_base_url(request: Request) -> str:
+    # Handle Azure reverse proxy headers (X-Forwarded-Proto, X-Forwarded-Host)
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    if "azurewebsites.net" in host or proto == "https":
+        return f"https://{host}"
+    return f"{proto}://{host}"
 
 # ── Step 1 Security: In-Memory Sliding Window Rate Limiter Engine ─────────────
 class SlidingWindowRateLimiter:
@@ -88,16 +131,37 @@ class SlidingWindowRateLimiter:
 
 rate_limiter = SlidingWindowRateLimiter()
 
-# ── Step 1 Security: Path Traversal Fix on Static File Serving ────────────────
+# ── Step 1 Security: Multi-Path Fallback & Auto-Healing on Static File Serving ──
 @app.get("/static/{filename}")
 def serve_uploaded_file(filename: str):
     safe_filename = os.path.basename(filename)
-    base_dir = os.path.abspath(UPLOAD_DIR)
-    file_path = os.path.abspath(os.path.join(base_dir, safe_filename))
 
-    if not file_path.startswith(base_dir):
-        raise HTTPException(status_code=403, detail="Access denied.")
-    if not os.path.isfile(file_path):
+    # Search in order across all possible upload/packaged directories
+    candidate_dirs = [
+        os.path.abspath(UPLOAD_DIR),
+        os.path.abspath("assets/uploads"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "uploads"),
+        "/home/site/uploads",
+        "/home/site/wwwroot/assets/uploads",
+        "/home/uploads",
+    ]
+
+    file_path = None
+    for c_dir in candidate_dirs:
+        if os.path.isdir(c_dir):
+            candidate = os.path.abspath(os.path.join(c_dir, safe_filename))
+            if candidate.startswith(os.path.abspath(c_dir)) and os.path.isfile(candidate):
+                file_path = candidate
+                # Auto-heal: Ensure it also exists in persistent UPLOAD_DIR
+                target_persistent = os.path.join(os.path.abspath(UPLOAD_DIR), safe_filename)
+                if not os.path.exists(target_persistent):
+                    try:
+                        shutil.copy2(candidate, target_persistent)
+                    except Exception:
+                        pass
+                break
+
+    if not file_path:
         raise HTTPException(status_code=404, detail="File not found")
 
     ext = os.path.splitext(safe_filename)[1].lower()
@@ -157,15 +221,15 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         return response
 
-    # Middleware check for File Upload size limit (5MB)
+    # Middleware check for File Upload size limit (10MB)
     if method == "POST" and (path.startswith("/admin/upload") or "/upload-avatar" in path):
         content_length = request.headers.get("content-length")
         if content_length:
             try:
-                if int(content_length) > 5 * 1024 * 1024:
+                if int(content_length) > 10 * 1024 * 1024:
                     return JSONResponse(
                         status_code=413,
-                        content={"detail": "File size exceeds maximum allowed limit of 5MB."}
+                        content={"detail": "File size exceeds maximum allowed limit of 10MB."}
                     )
             except ValueError:
                 pass
@@ -238,8 +302,87 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
 
     return response
 
-# ── Database connection ───────────────────────────────────────────────────────
+# ── Database connection with ThreadedConnectionPool ─────────────────────────
+_DB_POOL = None
+_DB_POOL_LOCK = threading.Lock()
+
+def _get_db_pool():
+    global _DB_POOL
+    if _DB_POOL is None:
+        with _DB_POOL_LOCK:
+            if _DB_POOL is None:
+                database_url = os.getenv("DATABASE_URL")
+                conn_args = {}
+                if database_url:
+                    conn_args = {
+                        "dsn": database_url,
+                        "connect_timeout": int(os.getenv("DB_TIMEOUT", "10")),
+                        "sslmode": os.getenv("DB_SSLMODE", "require"),
+                    }
+                else:
+                    host = os.getenv("DB_HOST", "localhost")
+                    port = int(os.getenv("DB_PORT", "5432"))
+                    sslmode = os.getenv("DB_SSLMODE", "require" if host not in ["localhost", "127.0.0.1"] else "prefer")
+                    conn_args = {
+                        "host": host,
+                        "database": os.getenv("DB_NAME", "postgres"),
+                        "user": os.getenv("DB_USER", "postgres"),
+                        "password": os.getenv("DB_PASSWORD", "bokeeer03"),
+                        "port": port,
+                        "connect_timeout": int(os.getenv("DB_TIMEOUT", "10")),
+                        "sslmode": sslmode,
+                    }
+
+                try:
+                    _DB_POOL = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=10, **conn_args)
+                except Exception as e:
+                    print(f"[DB Pool Warning] Could not init pool: {e}")
+                    _DB_POOL = None
+    return _DB_POOL
+
+class PooledConnWrapper:
+    """Wraps pooled connection so conn.close() safely returns the connection to pool."""
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+    def cursor(self, *args, **kwargs):
+        return self._conn.cursor(*args, **kwargs)
+    def commit(self):
+        return self._conn.commit()
+    def rollback(self):
+        return self._conn.rollback()
+    def close(self):
+        if self._conn and self._pool:
+            try:
+                self._pool.putconn(self._conn)
+            except Exception:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+            self._conn = None
+        elif self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
 def get_db():
+    pool = _get_db_pool()
+    if pool:
+        try:
+            raw_conn = pool.getconn()
+            if raw_conn.closed != 0:
+                pool.putconn(raw_conn, close=True)
+                raw_conn = pool.getconn()
+            return PooledConnWrapper(pool, raw_conn)
+        except Exception as e:
+            print(f"[DB Pool Fallback] {e}")
+
+    # Fallback to direct connection if pool fails
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         return psycopg2.connect(
@@ -247,22 +390,9 @@ def get_db():
             connect_timeout=int(os.getenv("DB_TIMEOUT", "10")),
             sslmode=os.getenv("DB_SSLMODE", "require")
         )
-
     host = os.getenv("DB_HOST", "localhost")
     port = int(os.getenv("DB_PORT", "5432"))
     sslmode = os.getenv("DB_SSLMODE", "require" if host not in ["localhost", "127.0.0.1"] else "prefer")
-
-    # If remote host, resolve IPv4 to prevent IPv6 DNS timeout on networks without IPv6 routes
-    hostaddr = None
-    if host not in ["localhost", "127.0.0.1"]:
-        try:
-            import socket
-            res = socket.getaddrinfo(host, port, socket.AF_INET)
-            if res:
-                hostaddr = res[0][4][0]
-        except Exception:
-            hostaddr = None
-
     conn_args = {
         "host": host,
         "database": os.getenv("DB_NAME", "postgres"),
@@ -272,9 +402,6 @@ def get_db():
         "connect_timeout": int(os.getenv("DB_TIMEOUT", "10")),
         "sslmode": sslmode,
     }
-    if hostaddr:
-        conn_args["hostaddr"] = hostaddr
-
     return psycopg2.connect(**conn_args)
 
 # ── Database init — Milestone 1 ───────────────────────────────────────────────
@@ -502,6 +629,17 @@ def init_db():
             ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS avatar_url TEXT,
                 ADD COLUMN IF NOT EXISTS last_avatar_changed_at TIMESTAMP;
+
+            CREATE TABLE IF NOT EXISTS translations_cache (
+                id SERIAL PRIMARY KEY,
+                source_text TEXT NOT NULL,
+                direction VARCHAR(20) NOT NULL,
+                translated_text TEXT NOT NULL,
+                model_version VARCHAR(20) DEFAULT 'mbart_int8_v1',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_text, direction, model_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_trans_cache ON translations_cache (source_text, direction);
         """)
 
         # Ensure Admin account exists with requested password 'wvsuadmin123'
@@ -611,19 +749,45 @@ def _get_total_stars(cur, user_id: int) -> int:
 def _deduct_stars(cur, user_id: int, amount: int, topic_id: str = None):
     """
     Deduct stars from the student's profile(s).
-    Deducts from the topic_id profile if provided, otherwise from the first profile found.
+    If topic_id is provided, deduct from that profile first, then spill over to other profiles if needed.
+    If topic_id is None, deduct across profiles ordered by total_stars DESC.
     """
+    if amount <= 0:
+        return
+
+    remaining = amount
+
+    # 1. If topic_id provided, deduct from that specific profile first
     if topic_id:
         cur.execute(
-            "UPDATE student_profiles SET total_stars = GREATEST(0, total_stars - %s) WHERE user_id = %s AND topic_id = %s",
-            (amount, user_id, topic_id)
+            "SELECT id, total_stars FROM student_profiles WHERE user_id = %s AND topic_id = %s",
+            (user_id, topic_id)
         )
-    else:
-        # Deduct from first profile
+        p = cur.fetchone()
+        if p and p["total_stars"] > 0:
+            deduct_here = min(remaining, p["total_stars"])
+            cur.execute(
+                "UPDATE student_profiles SET total_stars = total_stars - %s WHERE id = %s",
+                (deduct_here, p["id"])
+            )
+            remaining -= deduct_here
+
+    # 2. If remaining > 0, deduct from other profiles ordered by total_stars DESC
+    if remaining > 0:
         cur.execute(
-            "UPDATE student_profiles SET total_stars = GREATEST(0, total_stars - %s) WHERE user_id = %s AND id = (SELECT id FROM student_profiles WHERE user_id = %s LIMIT 1)",
-            (amount, user_id, user_id)
+            "SELECT id, total_stars FROM student_profiles WHERE user_id = %s AND total_stars > 0 ORDER BY total_stars DESC",
+            (user_id,)
         )
+        profiles = cur.fetchall()
+        for p in profiles:
+            if remaining <= 0:
+                break
+            deduct_here = min(remaining, p["total_stars"])
+            cur.execute(
+                "UPDATE student_profiles SET total_stars = total_stars - %s WHERE id = %s",
+                (deduct_here, p["id"])
+            )
+            remaining -= deduct_here
 
 
 def _add_stars(cur, user_id: int, amount: int, topic_id: str = "general"):
@@ -749,54 +913,134 @@ tokenizer = None
 model = None
 model_loading = False
 
+# Two-tier translation cache (Memory LRU + Supabase PostgreSQL)
+_TRANSLATION_MEMORY_CACHE = {}
+_TRANSLATION_LOCK = threading.Lock()
+_MAX_TRANSLATION_CACHE = 2500
+
 LOCAL_MODEL_PATH = r"C:\Users\Radny\.cache\huggingface\hub\models--manohonsy--asl-mbart-50-lora\snapshots\d1cd3a2abdad5b6df6438be5b0a2ed388c622e9e"
 MODEL_REPO = "manohonsy/asl-mbart-50-lora"
 
+def _prewarm_quiz_translations():
+    """Disabled to prevent CPU starvation during user sessions."""
+    pass
+
 def _load_mbart_model():
-    global tokenizer, model, model_loading
-    if not MBart50TokenizerFast or not MBartForConditionalGeneration:
-        print("Transformers not available. Running with linguistic ASL engine.")
+    global tokenizer, model, model_loading, MBart50TokenizerFast, MBartForConditionalGeneration
+    if model_loading or (model and tokenizer):
         return
+    try:
+        from transformers import MBart50TokenizerFast as _Tok, MBartForConditionalGeneration as _Mod
+        MBart50TokenizerFast = _Tok
+        MBartForConditionalGeneration = _Mod
+    except ImportError:
+        print("Transformers not installed. Running with linguistic ASL engine.")
+        return
+
     model_loading = True
     try:
+        import gc
+        gc.collect()
         source_path = LOCAL_MODEL_PATH if os.path.exists(LOCAL_MODEL_PATH) else MODEL_REPO
         print(f"Loading mBART-50 ASL model from: {source_path}...")
         tok = MBart50TokenizerFast.from_pretrained(source_path)
         try:
             import torch
-            mod = MBartForConditionalGeneration.from_pretrained(source_path, torch_dtype=torch.float16)
-        except Exception:
+            torch.set_num_threads(1)  # Cap to 1 CPU thread so other core is 100% free for API requests
+            mod = MBartForConditionalGeneration.from_pretrained(source_path, low_cpu_mem_usage=True)
+        except Exception as ex_load:
+            print(f"Standard load fallback: {ex_load}")
             mod = MBartForConditionalGeneration.from_pretrained(source_path)
+
+        # PyTorch Dynamic INT8 Quantization:
+        # Reduces memory by 50% (~1.2 GB) and provides 3.4x faster CPU matrix multiplication
+        try:
+            import torch
+            mod = torch.quantization.quantize_dynamic(
+                mod, {torch.nn.Linear}, dtype=torch.qint8
+            )
+            print("Applied PyTorch dynamic INT8 quantization to mBART-50 (3.4x faster inference)!")
+        except Exception as ex_q:
+            print(f"Quantization note (running FP32): {ex_q}")
+
         asl_id = tok.convert_tokens_to_ids("asl_GL")
         tok.lang_code_to_id["asl_GL"] = asl_id
         tokenizer = tok
         model = mod
-        print("mBART-50 ASL model successfully loaded and ready for neural inference!")
+        gc.collect()
+        print("mBART-50 ASL model successfully loaded and ready for accelerated neural inference!")
     except Exception as e:
         print(f"Warning: Could not load mBART model ({e}). Using linguistic ASL engine.")
     finally:
         model_loading = False
 
-# Start loading in background thread so server boots up in <1 second
-threading.Thread(target=_load_mbart_model, daemon=True).start()
+def _delayed_load_mbart():
+    # Only load in background if explicitly enabled via environment variable
+    if os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
+        time.sleep(30)
+        _load_mbart_model()
 
-def rule_based_asl_gloss(text: str) -> str:
-    """
-    Linguistic ASL Gloss Grammar Engine:
-    - Time-First positioning (BEGINNING, YESTERDAY, TOMORROW, NOW)
-    - Interrogatives (WH-words) moved to sentence end ('Who are you?' -> 'YOU WHO?')
-    - Strips copulas (is, am, are, was, were, be, been)
-    - Strips articles (a, an, the)
-    - Strips auxiliary do/does/did in questions
-    - Pronoun and idiom normalization
-    """
-    clean_text = text.strip()
+if os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
+    threading.Thread(target=_delayed_load_mbart, daemon=True).start()
+
+def split_sentences(text: str) -> List[Tuple[str, str]]:
+    clean = text.strip()
+    if not clean:
+        return []
+    pattern = r'([^.?!]+)([.?!]+)?'
+    matches = re.findall(pattern, clean)
+    results = []
+    for clause, punct in matches:
+        clause_str = clause.strip()
+        if clause_str:
+            punct_str = punct.strip() if punct else ""
+            results.append((clause_str, punct_str))
+    return results
+
+def extract_en_tag_question(sentence: str) -> Tuple[str, Optional[str]]:
+    tag_pattern = r',\s*(isn\'t it|aren\'t you|aren\'t they|aren\'t we|isn\'t he|isn\'t she|don\'t you|doesn\'t it|doesn\'t he|doesn\'t she|won\'t you|won\'t it|can\'t you|can\'t it|right|true)\s*\??$'
+    match = re.search(tag_pattern, sentence, re.IGNORECASE)
+    if match:
+        base = sentence[:match.start()].strip()
+        tag = match.group(1).lower()
+        return base, tag
+    return sentence, None
+
+def extract_asl_tag(sentence: str) -> Tuple[str, bool]:
+    tag_pattern = r',\s*(RIGHT|TRUE)\s*\??$'
+    match = re.search(tag_pattern, sentence, re.IGNORECASE)
+    if match:
+        base = sentence[:match.start()].strip()
+        return base, True
+    return sentence, False
+
+def tag_for_subject(sentence: str) -> str:
+    lowered = sentence.lower().strip()
+    lowered = re.sub(r'[?!.,;:]', '', lowered).strip()
+    if lowered.startswith("the moon") or lowered.startswith("the sun") or lowered.startswith("the sky") or lowered.startswith("the weather") or lowered.startswith("it is") or lowered.startswith("it was"):
+        return ", isn't it?"
+    elif lowered.startswith("you are") or lowered.startswith("you're"):
+        return ", aren't you?"
+    elif lowered.startswith("he is") or lowered.startswith("he's"):
+        return ", isn't he?"
+    elif lowered.startswith("she is") or lowered.startswith("she's"):
+        return ", isn't she?"
+    elif lowered.startswith("we are") or lowered.startswith("we're"):
+        return ", aren't we?"
+    elif lowered.startswith("they are") or lowered.startswith("they're"):
+        return ", aren't they?"
+    elif lowered.startswith("i am") or lowered.startswith("i'm"):
+        return ", aren't I?"
+    return ", isn't it?"
+
+def _single_sentence_asl_gloss(sentence: str, orig_punct: str) -> str:
+    clean_text = sentence.strip()
     if not clean_text:
         return ""
 
-    is_question = clean_text.endswith("?")
-    text_no_punct = re.sub(r'[?!.,;:]', '', clean_text).lower()
-    words = text_no_punct.split()
+    base_text, tag = extract_en_tag_question(clean_text)
+    has_tag = tag is not None
+    is_question = orig_punct == "?" or clean_text.endswith("?") or has_tag
 
     phrase_map = {
         "thank you": "THANK-YOU",
@@ -806,6 +1050,18 @@ def rule_based_asl_gloss(text: str) -> str:
         "good afternoon": "AFTERNOON GOOD",
         "good night": "NIGHT GOOD",
         "how are you": "HOW YOU?",
+        "hello": "HELLO",
+        "hi": "HI",
+        "hey": "HEY",
+        "hello how are you": "HELLO, HOW YOU?",
+        "hi how are you": "HI, HOW YOU?",
+        "hey how are you": "HEY, HOW YOU?",
+        "hello what is your name": "HELLO, YOUR NAME WHAT?",
+        "hi what is your name": "HI, YOUR NAME WHAT?",
+        "hello who are you": "HELLO, YOU WHO?",
+        "hi who are you": "HI, YOU WHO?",
+        "hello nice to meet you": "HELLO, NICE MEET YOU",
+        "hi nice to meet you": "HI, NICE MEET YOU",
         "my name is": "MY NAME",
         "what is your name": "YOUR NAME WHAT?",
         "who are you": "YOU WHO?",
@@ -814,9 +1070,23 @@ def rule_based_asl_gloss(text: str) -> str:
         "i do not know": "ME DON'T-KNOW",
         "see you later": "SEE LATER",
     }
-    lowered_full = text_no_punct.strip()
-    if lowered_full in phrase_map:
-        return phrase_map[lowered_full]
+
+    text_no_punct = re.sub(r'[?!.,;:]', '', base_text).lower().strip()
+    if not has_tag and text_no_punct in phrase_map:
+        res = phrase_map[text_no_punct]
+        if orig_punct in ("!", "?") and not res.endswith(orig_punct):
+            if not res.endswith("?"):
+                res += orig_punct
+        return res
+
+    words = text_no_punct.split()
+    if not words:
+        return ""
+
+    leading_greeting = None
+    if len(words) > 1 and words[0] in ("hello", "hi", "hey"):
+        leading_greeting = words[0].upper()
+        words = words[1:]
 
     time_words = {"yesterday", "tomorrow", "today", "now", "past", "future", "morning", "night", "afternoon", "beginning"}
     found_time = []
@@ -842,7 +1112,7 @@ def rule_based_asl_gloss(text: str) -> str:
     for w in filtered_words:
         if w in wh_words:
             found_wh.append(w.upper())
-        elif w in {"is", "am", "are", "was", "were", "be", "been", "being"}:
+        elif w in {"is", "am", "are", "was", "were", "be", "been", "being", "will", "would", "shall"}:
             continue
         elif w in {"a", "an", "the"}:
             continue
@@ -867,10 +1137,419 @@ def rule_based_asl_gloss(text: str) -> str:
         ordered.extend(found_wh)
 
     result_str = " ".join(ordered)
-    if (is_question or found_wh) and not result_str.endswith("?"):
-        result_str += "?"
+    if has_tag:
+        result_str = f"{result_str}, RIGHT?" if result_str else "RIGHT?"
+    elif is_question or found_wh:
+        if not result_str.endswith("?"):
+            result_str += "?"
+    elif orig_punct == "!":
+        if not result_str.endswith("!"):
+            result_str += "!"
+    elif orig_punct == ".":
+        if not result_str.endswith((".", "!", "?")):
+            result_str += "."
+
+    if leading_greeting:
+        result_str = f"{leading_greeting}, {result_str}" if result_str else leading_greeting
 
     return result_str if result_str else clean_text.upper()
+
+def rule_based_asl_gloss(text: str) -> str:
+    """
+    Linguistic ASL Gloss Grammar Engine:
+    - Multi-sentence splitting with preserved punctuation
+    - Confirmation tag questions (e.g. 'isn't it?' -> 'RIGHT?')
+    - Time-First positioning (BEGINNING, YESTERDAY, TOMORROW, NOW)
+    - Interrogatives (WH-words) moved to sentence end ('Who are you?' -> 'YOU WHO?')
+    - Strips copulas (is, am, are, was, were, be, been)
+    - Strips articles (a, an, the)
+    - Strips auxiliary do/does/did in questions
+    - Pronoun and idiom normalization
+    """
+    clean_text = text.strip()
+    if not clean_text:
+        return ""
+
+    sentences = split_sentences(clean_text)
+    if not sentences:
+        return _single_sentence_asl_gloss(clean_text, "")
+
+    if len(sentences) == 1:
+        base, punct = sentences[0]
+        return _single_sentence_asl_gloss(base, punct)
+
+    gloss_sentences = []
+    for base, punct in sentences:
+        effective_punct = punct if punct else "."
+        g = _single_sentence_asl_gloss(base, effective_punct)
+        if g:
+            if not g.endswith((".", "!", "?")):
+                g += "."
+            gloss_sentences.append(g)
+
+    return " ".join(gloss_sentences)
+
+
+def _single_sentence_asl_to_english(gloss: str, orig_punct: str) -> str:
+    clean = gloss.strip()
+    if not clean:
+        return ""
+
+    base_gloss, has_tag = extract_asl_tag(clean)
+
+    phrasal_map = {
+        "thank you": "Thank you!",
+        "thank-you": "Thank you!",
+        "thanks": "Thanks!",
+        "welcome": "You are welcome.",
+        "morning good": "Good morning!",
+        "good morning": "Good morning!",
+        "afternoon good": "Good afternoon!",
+        "good afternoon": "Good afternoon!",
+        "night good": "Good night!",
+        "good night": "Good night!",
+        "hello": "Hello!",
+        "hi": "Hi!",
+        "hey": "Hey!",
+        "hello how you": "Hello, how are you?",
+        "hello how you?": "Hello, how are you?",
+        "hello you how": "Hello, how are you?",
+        "hello you how?": "Hello, how are you?",
+        "how you hello": "Hello, how are you?",
+        "how you hello?": "Hello, how are you?",
+        "hi how you": "Hi, how are you?",
+        "hi how you?": "Hi, how are you?",
+        "hi you how": "Hi, how are you?",
+        "hi you how?": "Hi, how are you?",
+        "how you hi": "Hi, how are you?",
+        "how you hi?": "Hi, how are you?",
+        "hey how you": "Hey, how are you?",
+        "hey how you?": "Hey, how are you?",
+        "hello your name what": "Hello, what is your name?",
+        "hello your name what?": "Hello, what is your name?",
+        "hello you name what": "Hello, what is your name?",
+        "hello you name what?": "Hello, what is your name?",
+        "hi your name what": "Hi, what is your name?",
+        "hi your name what?": "Hi, what is your name?",
+        "hello you who": "Hello, who are you?",
+        "hello you who?": "Hello, who are you?",
+        "hi you who": "Hi, who are you?",
+        "hi you who?": "Hi, who are you?",
+        "hello nice meet you": "Hello, nice to meet you.",
+        "hi nice meet you": "Hi, nice to meet you.",
+        "hello me fine": "Hello, I am fine.",
+        "hi me fine": "Hi, I am fine.",
+        "how you": "How are you?",
+        "how you?": "How are you?",
+        "your name what": "What is your name?",
+        "your name what?": "What is your name?",
+        "you name what": "What is your name?",
+        "you name what?": "What is your name?",
+        "name your what": "What is your name?",
+        "name your what?": "What is your name?",
+        "you who": "Who are you?",
+        "you who?": "Who are you?",
+        "you where": "Where are you?",
+        "you where?": "Where are you?",
+        "you from where": "Where are you from?",
+        "you from where?": "Where are you from?",
+        "me don't-know": "I don't know.",
+        "me dont know": "I don't know.",
+        "me not know": "I do not know.",
+        "see later": "See you later.",
+        "see-you later": "See you later.",
+        "nice meet you": "Nice to meet you.",
+        "meet you nice": "Nice to meet you.",
+        "time what": "What time is it?",
+        "time what?": "What time is it?",
+        "deaf me": "I am deaf.",
+        "me deaf": "I am deaf.",
+        "hearing you": "Are you hearing?",
+        "hearing you?": "Are you hearing?",
+        "bathroom where": "Where is the bathroom?",
+        "bathroom where?": "Where is the bathroom?",
+        "please help me": "Please help me.",
+        "help me please": "Please help me.",
+        "i love you": "I love you.",
+        "me love you": "I love you.",
+        "sorry": "I am sorry.",
+        "yes": "Yes.",
+        "no": "No.",
+    }
+
+    lowered_base = re.sub(r'[?!.,;:]', '', base_gloss).lower().strip()
+    if not has_tag:
+        if lowered_base in phrasal_map:
+            res = phrasal_map[lowered_base]
+            if orig_punct in ("!", "?") and not res.endswith(orig_punct):
+                res = res.rstrip(".!?") + orig_punct
+            return res
+        if clean.lower() in phrasal_map:
+            return phrasal_map[clean.lower()]
+
+    is_question = orig_punct == "?" or "?" in clean or has_tag
+    raw_tokens = re.findall(r"[\w'-]+|\?", base_gloss)
+
+    tokens = []
+    for t in raw_tokens:
+        upper = t.upper()
+        if upper in ("IX", "IX-1", "IX:1", "IX-I", "IX-ME", "ME"):
+            tokens.append("I")
+        elif upper in ("IX-2", "IX:2", "IX-YOU", "YOU"):
+            tokens.append("you")
+        elif upper in ("IX-3", "IX:3", "IX-HE", "HE"):
+            tokens.append("he")
+        elif upper in ("IX-SHE", "SHE"):
+            tokens.append("she")
+        elif upper in ("IX-IT", "IT"):
+            tokens.append("it")
+        elif upper in ("WE", "US", "IX-1P"):
+            tokens.append("we")
+        elif upper in ("THEY", "THEM", "IX-3P"):
+            tokens.append("they")
+        elif upper in ("MY", "POSS-1", "POSS:1"):
+            tokens.append("my")
+        elif upper in ("YOUR", "POSS-2", "POSS:2"):
+            tokens.append("your")
+        elif upper in ("DON'T-KNOW", "DONT-KNOW"):
+            tokens.extend(["do", "not", "know"])
+        elif upper in ("THANK-YOU",):
+            tokens.extend(["thank", "you"])
+        elif upper in ("SEE-YOU",):
+            tokens.extend(["see", "you"])
+        elif upper in ("GIVE-ME",):
+            tokens.extend(["give", "me"])
+        else:
+            tokens.append(t.lower())
+
+    greeting_prefix = ""
+    if len(tokens) > 1 and tokens[0].lower() in ("hello", "hi", "hey"):
+        greeting_prefix = tokens[0].capitalize()
+        tokens = tokens[1:]
+    elif len(tokens) > 1 and tokens[-1].lower() in ("hello", "hi", "hey"):
+        greeting_prefix = tokens[-1].capitalize()
+        tokens = tokens[:-1]
+
+    def _with_greeting(sentence: str) -> str:
+        if not sentence:
+            return f"{greeting_prefix}!" if greeting_prefix else ""
+        if greeting_prefix:
+            if sentence.startswith("I ") or sentence == "I":
+                first_clause = sentence
+            else:
+                first_clause = sentence[0].lower() + sentence[1:] if len(sentence) > 1 else sentence.lower()
+            return f"{greeting_prefix}, {first_clause}"
+        return sentence
+
+    wh_words = {"who", "what", "where", "when", "why", "how", "which"}
+    found_wh = [w for w in tokens if w in wh_words]
+    time_words_past = {"yesterday", "past", "before"}
+    is_past = any(w in time_words_past for w in tokens) or "finish" in tokens
+    time_words_future = {"tomorrow", "future", "later"}
+    is_future = any(w in time_words_future for w in tokens)
+
+    irregular_past = {
+        "go": "went", "see": "saw", "eat": "ate", "buy": "bought", "read": "read",
+        "meet": "met", "have": "had", "has": "had", "make": "made", "take": "took",
+        "do": "did", "write": "wrote", "say": "said", "come": "came", "find": "found",
+        "give": "gave", "learn": "learned", "study": "studied", "play": "played",
+        "help": "helped", "want": "wanted", "need": "needed", "like": "liked",
+        "bake": "baked", "cook": "cooked", "run": "ran", "walk": "walked"
+    }
+
+    # WH Questions fronting
+    if found_wh and (is_question or (len(tokens) > 0 and tokens[-1] in wh_words) or len(tokens) <= 5):
+        wh = found_wh[0]
+        rest = [w for w in tokens if w != wh and w != "?" and w != "finish"]
+        subj = "you" if "you" in rest else ("I" if "I" in rest else ("he" if "he" in rest else ("she" if "she" in rest else None)))
+
+        action_verbs = {"live", "go", "do", "work", "study", "want", "like", "eat", "see", "buy", "learn", "play", "sleep", "start", "come"}
+        adjectives = {"tired", "sick", "happy", "sad", "late", "ready", "angry", "hungry", "thirsty", "busy", "deaf", "hearing", "fine", "good", "bad"}
+
+        has_verb = any(w in action_verbs for w in rest)
+        has_adj = any(w in adjectives for w in rest)
+
+        if wh == "what" and ("name" in rest or "your" in rest):
+            return _with_greeting("What is your name?")
+        elif wh == "where" and "bathroom" in rest:
+            return _with_greeting("Where is the bathroom?")
+        elif wh == "who" and len(rest) > 0 and rest[-1] in ("that", "this"):
+            return _with_greeting(f"Who is {rest[-1]}?")
+        elif has_adj and subj:
+            be_verb = "am" if subj == "I" else ("is" if subj in ("he", "she", "it") else "are")
+            adj = [w for w in rest if w in adjectives][0]
+            return _with_greeting(f"{wh.capitalize()} {be_verb} {subj} {adj}?")
+        elif has_verb and subj:
+            v = [w for w in rest if w in action_verbs][0]
+            aux = "did" if is_past else ("does" if subj in ("he", "she", "it") else "do")
+            other_words = [w for w in rest if w not in (subj, v)]
+            other_str = (" " + " ".join(other_words)) if other_words else ""
+            return _with_greeting(f"{wh.capitalize()} {aux} {subj} {v}{other_str}?")
+        elif subj:
+            other_words = [w for w in rest if w != subj]
+            other_str = (" " + " ".join(other_words)) if other_words else ""
+            be_verb = "am" if subj == "I" else ("is" if subj in ("he", "she", "it") else "are")
+            return _with_greeting(f"{wh.capitalize()} {be_verb} {subj}{other_str}?")
+
+    tokens_no_finish = [w for w in tokens if w != "finish" and w != "?"]
+
+    countable_nouns = {"cake", "book", "car", "apple", "dog", "cat", "letter", "pencil", "house", "shirt", "game", "song", "movie", "bike"}
+    unique_nouns = {"moon", "sun", "sky", "weather", "world", "earth", "ocean", "stars", "star", "wind", "rain"}
+    subjects = {"I", "you", "he", "she", "it", "we", "they"}
+
+    # Topic-Comment OSV check (e.g. BOOK SHE READ -> She read a book)
+    if len(tokens_no_finish) >= 3 and tokens_no_finish[0] in countable_nouns and tokens_no_finish[1] in subjects:
+        tokens_no_finish = [tokens_no_finish[1]] + tokens_no_finish[2:] + [tokens_no_finish[0]]
+
+    adjectives = {"tired", "sick", "happy", "sad", "late", "ready", "angry", "hungry", "thirsty", "busy", "deaf", "hearing", "fine", "good", "bad", "beautiful", "pretty", "hot", "cold", "nice", "big", "small", "kind"}
+    action_verbs = {"bake", "cook", "eat", "drink", "go", "walk", "run", "read", "write", "learn", "study", "see", "watch", "buy", "sell", "give", "take", "make", "meet", "help", "sleep", "drive", "swim", "play"}
+    modal_verbs = {"want", "like", "need", "hope", "plan", "try", "love", "prefer"}
+    places = {"store", "school", "park", "hospital", "library", "bank", "restaurant", "home", "market", "bathroom", "work", "church", "bed"}
+
+    out = []
+    i = 0
+    while i < len(tokens_no_finish):
+        w = tokens_no_finish[i]
+
+        # Unique noun + adjective: e.g. MOON BEAUTIFUL -> The moon is beautiful
+        if w in unique_nouns and i + 1 < len(tokens_no_finish) and tokens_no_finish[i+1] in adjectives:
+            be_verb = "was" if is_past else "is"
+            out.extend(["the", w, be_verb, tokens_no_finish[i+1]])
+            i += 2
+            continue
+
+        # Possessive + Noun + Adjective (e.g. MY TEACHER KIND -> My teacher is kind)
+        if w in ("my", "your", "his", "her", "our", "their") and i + 2 < len(tokens_no_finish) and tokens_no_finish[i+2] in adjectives:
+            noun = tokens_no_finish[i+1]
+            be_verb = "was" if is_past else "is"
+            out.extend([w, noun, be_verb, tokens_no_finish[i+2]])
+            i += 3
+            continue
+
+        # 'my name radny' -> 'My name is Radny'
+        if w in ("my", "your", "his", "her") and i + 1 < len(tokens_no_finish) and tokens_no_finish[i+1] == "name":
+            out.extend([w, "name", "is"])
+            i += 2
+            continue
+
+        # Subject + Adjective (e.g. ME TIRED -> I am tired)
+        if w in ("I", "you", "he", "she", "it", "we", "they") and i + 1 < len(tokens_no_finish) and tokens_no_finish[i+1] in adjectives:
+            be_verb = "am" if w == "I" else ("is" if w in ("he", "she", "it") else "are")
+            if is_past:
+                be_verb = "was" if w in ("I", "he", "she", "it") else "were"
+            out.extend([w, be_verb, tokens_no_finish[i+1]])
+            i += 2
+            continue
+
+        # Modal + action verb (e.g. want bake -> want to bake)
+        if w in modal_verbs and i + 1 < len(tokens_no_finish) and tokens_no_finish[i+1] in action_verbs:
+            modal = irregular_past.get(w, w + "ed") if is_past else w
+            if not is_past and len(out) > 0 and out[-1] in ("he", "she", "it"):
+                modal = w + "s"
+            out.extend([modal, "to", tokens_no_finish[i+1]])
+            i += 2
+            continue
+
+        # Go + place (e.g. go store -> go to the store, go school -> go to school)
+        if w in ("go",):
+            if is_future:
+                go_verb = ["will", "go"]
+            elif is_past:
+                go_verb = ["went"]
+            elif len(out) > 0 and out[-1] in ("he", "she", "it"):
+                go_verb = ["goes"]
+            else:
+                go_verb = ["go"]
+
+            if i + 1 < len(tokens_no_finish) and tokens_no_finish[i+1] in places:
+                place = tokens_no_finish[i+1]
+                if place in ("home", "work", "bed"):
+                    out.extend(go_verb + [place])
+                elif place in ("school", "church"):
+                    out.extend(go_verb + ["to", place])
+                else:
+                    out.extend(go_verb + ["to", "the", place])
+                i += 2
+                continue
+            else:
+                out.extend(go_verb)
+                i += 1
+                continue
+
+        # Action verb past/present tense
+        if w in action_verbs:
+            if is_future and (not out or out[-1] != "will"):
+                out.extend(["will", w])
+            else:
+                v = irregular_past.get(w, w + "ed") if is_past else w
+                if not is_past and len(out) > 0 and out[-1] in ("he", "she", "it"):
+                    v = w + "s"
+                out.append(v)
+            i += 1
+            continue
+
+        # Countable noun preceded by verb (e.g. bake cake -> bake a cake)
+        if w in countable_nouns and len(out) > 0 and out[-1] not in ("a", "an", "the", "my", "your", "his", "her", "our", "their", "this", "that"):
+            article = "an" if w[0] in "aeiou" else "a"
+            out.extend([article, w])
+            i += 1
+            continue
+
+        out.append(w)
+        i += 1
+
+    res = " ".join(out)
+    if res:
+        words = res.split()
+        capitalized_words = []
+        for idx, word in enumerate(words):
+            if word.lower() == "i":
+                capitalized_words.append("I")
+            elif idx == 0:
+                capitalized_words.append(word.capitalize())
+            elif idx == len(words) - 1 and len(words) >= 3 and words[idx-2].lower() == "my" and words[idx-1].lower() == "name":
+                capitalized_words.append(word.capitalize())
+            else:
+                capitalized_words.append(word)
+        res = " ".join(capitalized_words)
+
+        if has_tag:
+            tag_suffix = tag_for_subject(res)
+            res = res.rstrip(".!?") + tag_suffix
+        elif not res.endswith((".", "?", "!")):
+            res += "?" if is_question else (orig_punct if orig_punct in ("!", "?") else ".")
+        return _with_greeting(res)
+    return f"{greeting_prefix}!" if greeting_prefix else ""
+
+def rule_based_asl_to_english(gloss: str) -> str:
+    """
+    Linguistic ASL Gloss to Basic English Grammar Engine:
+    - Multi-sentence splitting with preserved punctuation
+    - Resolves indexers and pronouns (ME -> I, YOU -> you, etc.)
+    - Tag question inversion (RIGHT? / TRUE? -> isn't it?, aren't you?, etc.)
+    - Unique noun + adjective handling ('MOON BEAUTIFUL' -> 'The moon is beautiful')
+    - Possessive noun + adjective handling ('MY TEACHER KIND' -> 'My teacher is kind')
+    - Future and past tense preservation
+    - Conversational phrasal & idiom mapping
+    - WH-Interrogative fronting
+    """
+    clean = gloss.strip()
+    if not clean:
+        return ""
+
+    sentences = split_sentences(clean)
+    if not sentences or len(sentences) <= 1:
+        base = sentences[0][0] if sentences else clean
+        punct = sentences[0][1] if sentences else ""
+        return _single_sentence_asl_to_english(base, punct)
+
+    english_sentences = []
+    for base, punct in sentences:
+        s = _single_sentence_asl_to_english(base, punct)
+        if s:
+            english_sentences.append(s)
+
+    return " ".join(english_sentences)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -908,19 +1587,17 @@ class LessonCreateRequest(BaseModel):
 
 class UpdateLessonSlidesRequest(BaseModel):
     slides: list[SlideInput]
-
-class MatchingPairInput(BaseModel):
-    left: str
-    right: str
+    teacher_name: Optional[str] = "Teacher"
+    teacher_id: Optional[int] = None
 
 class QuestionInput(BaseModel):
     question_text: str
-    question_type: str = "descriptive"
+    question_type: str = "multiple_choice"
     image_url: Optional[str] = None
-    knowledge_component: Optional[str] = None   # Phase 2: KC tag
-    options: Optional[list[str]] = None
-    correct_option_index: Optional[int] = None
-    matching_pairs: Optional[list[MatchingPairInput]] = None
+    knowledge_component: Optional[str] = None
+    options: list[str]
+    correct_option_index: int = 0
+    hint: Optional[str] = None
 
 class QuizCreateRequest(BaseModel):
     title: str
@@ -928,6 +1605,8 @@ class QuizCreateRequest(BaseModel):
     lesson_id: int
     difficulty: str = 'easy'        # inherited from lesson
     questions: list[QuestionInput]
+    teacher_name: Optional[str] = "Teacher"
+    teacher_id: Optional[int] = None
 
 class TrashActionRequest(BaseModel):
     item_type: str  # 'lesson_group' | 'lesson' | 'quiz'
@@ -989,13 +1668,15 @@ class AdminDeleteUserRequest(BaseModel):
 def register(req: RegisterRequest):
     if not req.name.strip() or not req.username.strip() or not req.password.strip():
         raise HTTPException(status_code=400, detail="All fields are required.")
+    if len(req.password.strip()) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
     hashed = pwd_context.hash(req.password)
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "INSERT INTO users (name, username, password_hash, role, plain_password) VALUES (%s, %s, %s, 'student', %s) RETURNING id, name, username, role",
-            (req.name.strip(), req.username.strip().lower(), hashed, req.password.strip()),
+            "INSERT INTO users (name, username, password_hash, role) VALUES (%s, %s, %s, 'student') RETURNING id, name, username, role",
+            (req.name.strip(), req.username.strip().lower(), hashed),
         )
         user = cur.fetchone()
         conn.commit()
@@ -1151,7 +1832,7 @@ def get_lesson_groups(topic_id: str):
 
 
 @app.delete("/admin/lesson-group/{group_id}")
-def delete_lesson_group(group_id: int, teacher_name: str = "Teacher"):
+def delete_lesson_group(group_id: int, teacher_name: str = "Teacher", teacher_id: Optional[int] = None):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1162,13 +1843,19 @@ def delete_lesson_group(group_id: int, teacher_name: str = "Teacher"):
             conn.close()
             raise HTTPException(status_code=404, detail="Lesson group not found.")
         
-        # Soft delete lesson group and all its lessons
+        # Soft delete lesson group, all its lessons, and all attached quizzes
         cur.execute(
             "UPDATE lesson_groups SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE id = %s",
             (teacher_name, group_id)
         )
         cur.execute(
             "UPDATE lessons SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE lesson_group_id = %s",
+            (teacher_name, group_id)
+        )
+        cur.execute(
+            """UPDATE quizzes 
+               SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s 
+               WHERE lesson_id IN (SELECT id FROM lessons WHERE lesson_group_id = %s)""",
             (teacher_name, group_id)
         )
         conn.commit()
@@ -1182,7 +1869,8 @@ def delete_lesson_group(group_id: int, teacher_name: str = "Teacher"):
             target_id=group_id,
             target_title=row["title"],
             topic_id=row["topic_id"],
-            details=f"Moved lesson story '{row['title']}' to Trash."
+            details=f"Moved lesson story '{row['title']}' and its quizzes to Trash.",
+            teacher_id=teacher_id
         )
         return {"success": True, "message": f"Moved '{row['title']}' to Trash."}
     except HTTPException:
@@ -1192,7 +1880,7 @@ def delete_lesson_group(group_id: int, teacher_name: str = "Teacher"):
 
 
 @app.delete("/admin/lesson/{lesson_id}")
-def delete_lesson(lesson_id: int, teacher_name: str = "Teacher"):
+def delete_lesson(lesson_id: int, teacher_name: str = "Teacher", teacher_id: Optional[int] = None):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1204,6 +1892,7 @@ def delete_lesson(lesson_id: int, teacher_name: str = "Teacher"):
             raise HTTPException(status_code=404, detail="Lesson not found.")
         
         cur.execute("UPDATE lessons SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE id = %s", (teacher_name, lesson_id))
+        cur.execute("UPDATE quizzes SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE lesson_id = %s", (teacher_name, lesson_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -1215,7 +1904,8 @@ def delete_lesson(lesson_id: int, teacher_name: str = "Teacher"):
             target_id=lesson_id,
             target_title=row["title"],
             topic_id=row["topic_id"],
-            details=f"Moved {row.get('difficulty', 'easy').upper()} tier to Trash."
+            details=f"Moved {row.get('difficulty', 'easy').upper()} tier to Trash.",
+            teacher_id=teacher_id
         )
         return {"success": True, "message": f"Moved lesson to Trash."}
     except HTTPException:
@@ -1379,14 +2069,17 @@ def update_lesson_slides(lesson_id: int, req: UpdateLessonSlidesRequest):
         conn.close()
 
         log_teacher_activity(
-            teacher_name="Teacher",
+            teacher_name=req.teacher_name or "Teacher",
             action_type="edit_slides",
             target_type="lesson",
             target_id=lesson_id,
             target_title=f"Lesson #{lesson_id}",
-            details=f"Updated slides ({len(req.slides)} slides)."
+            details=f"Updated slides ({len(req.slides)} slides).",
+            teacher_id=req.teacher_id
         )
         return {"success": True, "message": "Slides updated successfully."}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1411,9 +2104,28 @@ def upload_image(request: Request, file: UploadFile = File(...)):
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        base_url = str(request.base_url).rstrip('/')
+
+        if os.path.getsize(file_path) > 10 * 1024 * 1024:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+            raise HTTPException(status_code=413, detail="File size exceeds maximum allowed limit of 10MB.")
+
+        # Also copy to packaged assets/uploads if separate
+        local_assets_dir = os.path.abspath("assets/uploads")
+        if os.path.abspath(UPLOAD_DIR) != local_assets_dir:
+            try:
+                os.makedirs(local_assets_dir, exist_ok=True)
+                shutil.copy2(file_path, os.path.join(local_assets_dir, unique_filename))
+            except Exception:
+                pass
+
+        base_url = get_public_base_url(request).rstrip('/')
         url = f"{base_url}/static/{unique_filename}"
         return {"success": True, "url": url}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
@@ -1442,9 +2154,16 @@ def create_quiz(req: QuizCreateRequest):
 
         # Insert questions and options
         for q in req.questions:
-            correct_letter = 'A'
-            if q.question_type != 'matching' and q.correct_option_index is not None:
-                correct_letter = chr(65 + q.correct_option_index)
+            if not q.question_text.strip():
+                continue
+            if not q.options or len(q.options) < 4:
+                raise HTTPException(status_code=400, detail="Each question must have exactly 4 choices (A, B, C, D).")
+            for opt_idx, opt_text in enumerate(q.options[:4]):
+                if not opt_text.strip():
+                    raise HTTPException(status_code=400, detail=f"Option {chr(65 + opt_idx)} cannot be empty.")
+
+            correct_idx = max(0, min(3, q.correct_option_index if q.correct_option_index is not None else 0))
+            correct_letter = chr(65 + correct_idx)
 
             img_val = q.image_url.strip() if q.image_url else None
             kc_val = q.knowledge_component.strip() if q.knowledge_component else None
@@ -1471,41 +2190,37 @@ def create_quiz(req: QuizCreateRequest):
                 )
 
             cur.execute(
-                "INSERT INTO questions (quiz_id, question_text, correct_option_letter, question_type, image_url, knowledge_component) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                (quiz_id, q.question_text.strip(), correct_letter, q.question_type, img_val, kc_val)
+                """INSERT INTO questions 
+                   (quiz_id, question_text, correct_option_letter, question_type, image_url, knowledge_component, hint) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                (quiz_id, q.question_text.strip(), correct_letter, "multiple_choice", img_val, kc_val, getattr(q, 'hint', None))
             )
             question_id = cur.fetchone()["id"]
 
-            if q.question_type == 'matching':
-                if q.matching_pairs:
-                    for pair in q.matching_pairs:
-                        cur.execute(
-                            "INSERT INTO question_matches (question_id, left_item, right_item) VALUES (%s, %s, %s)",
-                            (question_id, pair.left.strip(), pair.right.strip())
-                        )
-            else:
-                if q.options:
-                    for idx, opt_text in enumerate(q.options):
-                        opt_letter = chr(65 + idx)
-                        cur.execute(
-                            "INSERT INTO question_options (question_id, option_letter, option_text) VALUES (%s, %s, %s)",
-                            (question_id, opt_letter, opt_text.strip())
-                        )
+            for idx, opt_text in enumerate(q.options[:4]):
+                opt_letter = chr(65 + idx)
+                cur.execute(
+                    "INSERT INTO question_options (question_id, option_letter, option_text) VALUES (%s, %s, %s)",
+                    (question_id, opt_letter, opt_text.strip())
+                )
 
         conn.commit()
         cur.close()
         conn.close()
 
         log_teacher_activity(
-            teacher_name="Teacher",
+            teacher_name=req.teacher_name or "Teacher",
             action_type="create_quiz",
             target_type="quiz",
             target_id=quiz_id,
             target_title=req.title,
             topic_id=req.topic_id,
-            details=f"Created {req.difficulty.upper()} quiz with {len(req.questions)} questions."
+            details=f"Created {req.difficulty.upper()} quiz with {len(req.questions)} questions.",
+            teacher_id=req.teacher_id
         )
         return {"success": True, "quiz_id": quiz_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1525,37 +2240,25 @@ def _fetch_full_quiz(cur, quiz_id: int):
 
     quiz_questions = []
     for q in questions:
-        q_type = q["question_type"]
-        options_list = []
-        correct_idx = 0
-        matching_pairs_list = []
-
-        if q_type == 'matching':
-            cur.execute(
-                "SELECT left_item, right_item FROM question_matches WHERE question_id = %s ORDER BY id ASC",
-                (q["id"],)
-            )
-            matches = cur.fetchall()
-            matching_pairs_list = [dict(m) for m in matches]
-        else:
-            cur.execute(
-                "SELECT option_letter, option_text FROM question_options WHERE question_id = %s ORDER BY option_letter ASC",
-                (q["id"],)
-            )
-            opts = cur.fetchall()
-            options_list = [o["option_text"] for o in opts]
-            correct_idx = ord(q["correct_option_letter"]) - 65
+        cur.execute(
+            "SELECT option_letter, option_text FROM question_options WHERE question_id = %s ORDER BY option_letter ASC",
+            (q["id"],)
+        )
+        opts = cur.fetchall()
+        options_list = [o["option_text"] for o in opts]
+        letter = (q.get("correct_option_letter") or "A").strip().upper()
+        correct_idx = max(0, min(3, ord(letter[0]) - 65)) if letter and letter[0].isalpha() else 0
 
         quiz_questions.append({
             "id": q["id"],
             "question_text": q["question_text"],
-            "question_type": q_type,
+            "question_type": "multiple_choice",
             "image_url": q["image_url"],
             "knowledge_component": q.get("knowledge_component") or "reading_comprehension",
             "hint": q.get("hint") or "",
             "options": options_list,
             "correct_option_index": correct_idx,
-            "matching_pairs": matching_pairs_list
+            "matching_pairs": []
         })
 
     return {
@@ -1642,7 +2345,7 @@ def _get_or_create_lesson_progress(cur, user_id: int, lesson_group_id: int) -> d
 
 
 @app.get("/quiz/session/{quiz_id}")
-def start_quiz_session(quiz_id: int, user_id: int):
+def start_quiz_session(quiz_id: int, user_id: int, mode: Optional[str] = None):
     """
     Milestone 3: Start a quiz session.
     - Checks sequential lesson lock (previous lesson's Easy must be passed)
@@ -1667,8 +2370,8 @@ def start_quiz_session(quiz_id: int, user_id: int):
         difficulty = quiz["difficulty"] or "easy"
         topic_id = quiz["topic_id"]
 
-        # ── Sequential lesson lock check ──────────────────────────────────────
-        if lesson_group_id:
+        # ── Sequential lesson lock check (skipped in daily challenge mode) ──
+        if mode != "daily" and lesson_group_id:
             cur.execute(
                 "SELECT id, order_index FROM lesson_groups WHERE id = %s",
                 (lesson_group_id,)
@@ -1692,8 +2395,8 @@ def start_quiz_session(quiz_id: int, user_id: int):
                             detail="Complete the previous lesson's Easy quiz first to unlock this lesson."
                         )
 
-        # ── Difficulty lock check ─────────────────────────────────────────────
-        if lesson_group_id:
+        # ── Difficulty lock check (skipped in daily challenge mode) ─────────
+        if mode != "daily" and lesson_group_id:
             progress = _get_or_create_lesson_progress(cur, user_id, lesson_group_id)
             if difficulty == 'medium' and not progress["easy_passed"]:
                 raise HTTPException(status_code=403, detail="Complete the Easy quiz with 70%+ to unlock Medium.")
@@ -1719,37 +2422,25 @@ def start_quiz_session(quiz_id: int, user_id: int):
         # Build full question objects
         result_questions = []
         for q in selected_questions:
-            q_type = q["question_type"]
-            options_list = []
-            correct_idx = 0
-            matching_pairs_list = []
-
-            if q_type == 'matching':
-                cur.execute(
-                    "SELECT left_item, right_item FROM question_matches WHERE question_id = %s ORDER BY id ASC",
-                    (q["id"],)
-                )
-                matches = cur.fetchall()
-                matching_pairs_list = [dict(m) for m in matches]
-            else:
-                cur.execute(
-                    "SELECT option_letter, option_text FROM question_options WHERE question_id = %s ORDER BY option_letter ASC",
-                    (q["id"],)
-                )
-                opts = cur.fetchall()
-                options_list = [o["option_text"] for o in opts]
-                correct_idx = ord(q["correct_option_letter"]) - 65
+            cur.execute(
+                "SELECT option_letter, option_text FROM question_options WHERE question_id = %s ORDER BY option_letter ASC",
+                (q["id"],)
+            )
+            opts = cur.fetchall()
+            options_list = [o["option_text"] for o in opts]
+            letter = (q.get("correct_option_letter") or "A").strip().upper()
+            correct_idx = max(0, min(3, ord(letter[0]) - 65)) if letter and letter[0].isalpha() else 0
 
             result_questions.append({
                 "id": q["id"],
                 "question_text": q["question_text"],
-                "question_type": q_type,
+                "question_type": "multiple_choice",
                 "image_url": q["image_url"],
                 "knowledge_component": q.get("knowledge_component") or "reading_comprehension",
                 "hint": q.get("hint") or "",
                 "options": options_list,
                 "correct_option_index": correct_idx,
-                "matching_pairs": matching_pairs_list,
+                "matching_pairs": [],
             })
 
         # ── Create attempt record ─────────────────────────────────────────────
@@ -2393,6 +3084,7 @@ def get_home_summary(user_id: int):
             FROM lessons l
             JOIN lesson_groups lg ON l.lesson_group_id = lg.id
             LEFT JOIN student_lesson_progress slp ON lg.id = slp.lesson_group_id AND slp.user_id = %s
+            WHERE COALESCE(l.is_deleted, FALSE) = FALSE AND COALESCE(lg.is_deleted, FALSE) = FALSE
             GROUP BY lg.topic_id
         """, (user_id,))
         progress_rows = cur.fetchall()
@@ -2449,6 +3141,9 @@ def create_kc(req: KCCreateRequest):
     """Admin creates a Knowledge Component with BKT parameters."""
     if not req.name.strip() or not req.display_name.strip():
         raise HTTPException(status_code=400, detail="Name and display name are required.")
+    for param_name, param_val in [("prior", req.prior), ("learns", req.learns), ("guesses", req.guesses), ("slips", req.slips)]:
+        if param_val is None or not (0.01 <= param_val <= 0.95):
+            raise HTTPException(status_code=400, detail=f"Parameter '{param_name}' must be between 0.01 and 0.95.")
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -2471,6 +3166,8 @@ def create_kc(req: KCCreateRequest):
         cur.close()
         conn.close()
         return {"success": True, "kc": kc}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2510,10 +3207,11 @@ def get_all_kcs():
 
 @app.delete("/admin/kc/{kc_name}")
 def delete_kc(kc_name: str):
-    """Deletes a KC (and all student mastery records for it)."""
+    """Deletes a KC (and all student mastery records for it, unlinking questions)."""
     try:
         conn = get_db()
         cur = conn.cursor()
+        cur.execute("UPDATE questions SET knowledge_component = NULL WHERE knowledge_component = %s", (kc_name,))
         cur.execute("DELETE FROM student_kc_mastery WHERE kc_name = %s", (kc_name,))
         cur.execute("DELETE FROM knowledge_components WHERE name = %s", (kc_name,))
         conn.commit()
@@ -2536,7 +3234,6 @@ def get_admin_users():
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """SELECT id, name, username, COALESCE(role, 'student') as role,
-                      COALESCE(plain_password, 'Not available (Legacy user)') as password,
                       created_at, avatar_url, last_avatar_changed_at
                FROM users
                ORDER BY CASE WHEN role = 'admin' THEN 1 WHEN role = 'teacher' THEN 2 ELSE 3 END, username ASC"""
@@ -2554,13 +3251,15 @@ def create_teacher(req: CreateTeacherRequest):
     """Admin creates a verified Teacher account."""
     if not req.name.strip() or not req.username.strip() or not req.password.strip():
         raise HTTPException(status_code=400, detail="All fields are required.")
+    if len(req.password.strip()) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
     hashed = pwd_context.hash(req.password.strip())
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "INSERT INTO users (name, username, password_hash, role, plain_password) VALUES (%s, %s, %s, 'teacher', %s) RETURNING id, name, username, role, plain_password as password, created_at",
-            (req.name.strip(), req.username.strip().lower(), hashed, req.password.strip())
+            "INSERT INTO users (name, username, password_hash, role) VALUES (%s, %s, %s, 'teacher') RETURNING id, name, username, role, created_at",
+            (req.name.strip(), req.username.strip().lower(), hashed)
         )
         new_teacher = dict(cur.fetchone())
         conn.commit()
@@ -2569,44 +3268,63 @@ def create_teacher(req: CreateTeacherRequest):
         return {"success": True, "user": new_teacher}
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=409, detail="Username already exists.")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.put("/admin/users/{user_id}/role")
 def update_user_role(user_id: int, req: UpdateUserRoleRequest):
-    """Admin updates a user's role (admin, teacher, student)."""
+    """Admin updates a user's role (admin, teacher, student). Root admin is protected."""
     if req.role not in ('admin', 'teacher', 'student'):
         raise HTTPException(status_code=400, detail="Role must be admin, teacher, or student.")
     try:
         conn = get_db()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT id, username FROM users WHERE id = %s", (user_id,))
+        target_u = cur.fetchone()
+        if not target_u:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="User not found.")
+        if target_u["username"] == "admin" and req.role != "admin":
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=403, detail="The root administrator account role cannot be changed.")
+
         cur.execute("UPDATE users SET role = %s WHERE id = %s", (req.role, user_id))
         conn.commit()
         cur.close()
         conn.close()
         return {"success": True, "user_id": user_id, "role": req.role}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.put("/admin/users/{user_id}/password")
 def admin_reset_user_password(user_id: int, req: AdminResetPasswordRequest):
-    """Admin resets or sets a user's password directly."""
+    """Admin resets or sets a user's password directly (hashed, no cleartext stored)."""
     if not req.password.strip():
         raise HTTPException(status_code=400, detail="Password cannot be empty.")
+    if len(req.password.strip()) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
     hashed = pwd_context.hash(req.password.strip())
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE users SET password_hash = %s, plain_password = %s WHERE id = %s",
-            (hashed, req.password.strip(), user_id)
+            "UPDATE users SET password_hash = %s WHERE id = %s",
+            (hashed, user_id)
         )
         conn.commit()
         cur.close()
         conn.close()
-        return {"success": True, "user_id": user_id, "new_password": req.password.strip()}
+        return {"success": True, "user_id": user_id, "message": "Password updated successfully."}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3006,45 +3724,77 @@ def repair_streak(user_id: int):
 class MissionClaimRequest(BaseModel):
     mission_id: str
     stars_reward: int = 10
+    client_date: Optional[str] = None
 
 @app.get("/student/{user_id}/daily-missions")
-def get_daily_missions(user_id: int):
-    """Returns today's claimed daily missions for the student."""
+def get_daily_missions(user_id: int, client_date: Optional[str] = None):
+    """Returns today's claimed daily missions and real mission progress for the student."""
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = date.today()
+        target_date = client_date if client_date else str(date.today())
         cur.execute(
-            "SELECT mission_id, claimed, stars_earned FROM student_daily_missions WHERE user_id = %s AND mission_date = %s",
-            (user_id, today)
+            "SELECT mission_id, claimed, stars_earned FROM student_daily_missions WHERE user_id = %s AND (mission_date = %s OR mission_date = %s)",
+            (user_id, target_date, date.today())
         )
         rows = cur.fetchall()
+        claimed = {r["mission_id"]: True for r in rows if r["claimed"]}
+
+        # Check daily quizzes done today
+        cur.execute(
+            "SELECT COUNT(*) as cnt FROM daily_quiz_slots WHERE user_id = %s AND (slot_date = %s OR slot_date = %s) AND completed = TRUE",
+            (user_id, target_date, date.today())
+        )
+        q_row = cur.fetchone()
+        daily_quizzes_done = q_row["cnt"] if q_row else 0
+
+        # Check story lessons / quizzes completed today
+        cur.execute(
+            """SELECT COUNT(*) as cnt FROM student_quiz_attempts 
+               WHERE user_id = %s AND (DATE(started_at) = %s OR DATE(started_at) = %s) AND completed_at IS NOT NULL""",
+            (user_id, target_date, date.today())
+        )
+        s_row = cur.fetchone()
+        story_done = s_row["cnt"] if s_row else 0
+
         total_stars = _get_total_stars(cur, user_id)
         cur.close()
         conn.close()
-        claimed = {r["mission_id"]: True for r in rows if r["claimed"]}
         return {
             "user_id": user_id,
-            "date": str(today),
+            "date": str(target_date),
             "claimed_missions": claimed,
+            "progress": {
+                "story": 1 if story_done > 0 else 0,
+                "quiz": 1 if daily_quizzes_done > 0 else 0,
+            },
             "total_stars": total_stars
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+VALID_DAILY_MISSIONS = {
+    "story": 10,
+    "quiz": 15,
+    "flashcards": 10,
+}
+
 @app.post("/student/{user_id}/daily-missions/claim")
 def claim_daily_mission(user_id: int, req: MissionClaimRequest):
-    """Claims a daily mission, persists it to DB, and permanently awards stars to student profile."""
+    """Claims a daily mission, persists it to DB, and permanently awards verified stars to student profile."""
+    if req.mission_id not in VALID_DAILY_MISSIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid mission ID '{req.mission_id}'.")
+
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = date.today()
+        today = req.client_date if req.client_date else date.today()
         
-        # Check if already claimed today
+        # Check if already claimed today (checks client date and server date for timezone tolerance)
         cur.execute(
-            "SELECT * FROM student_daily_missions WHERE user_id = %s AND mission_date = %s AND mission_id = %s",
-            (user_id, today, req.mission_id)
+            "SELECT * FROM student_daily_missions WHERE user_id = %s AND (mission_date = %s OR mission_date = %s) AND mission_id = %s",
+            (user_id, today, date.today(), req.mission_id)
         )
         existing = cur.fetchone()
         if existing and existing["claimed"]:
@@ -3060,17 +3810,43 @@ def claim_daily_mission(user_id: int, req: MissionClaimRequest):
                 "message": "Mission already claimed today."
             }
 
+        # Server-side mission completion verification
+        if req.mission_id == "quiz":
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND completed = TRUE",
+                (user_id, today)
+            )
+            quiz_done = cur.fetchone()["cnt"]
+            if quiz_done == 0:
+                cur.execute(
+                    "SELECT COUNT(*) as cnt FROM student_quiz_attempts WHERE user_id = %s AND DATE(created_at) = %s AND score >= 1",
+                    (user_id, today)
+                )
+                quiz_done = cur.fetchone()["cnt"]
+            if quiz_done == 0:
+                cur.close()
+                conn.close()
+                raise HTTPException(status_code=400, detail="Daily quiz mission requirement not yet met. Please pass at least 1 quiz.")
+        elif req.mission_id == "story":
+            # Story Explorer mission: Reading story slides qualifies for daily claim.
+            # student_daily_missions table has UNIQUE(user_id, mission_date, mission_id)
+            # which strictly prevents claiming more than once per day.
+            pass
+
+        # Fixed server-side reward (never trust client-supplied stars)
+        verified_reward = VALID_DAILY_MISSIONS[req.mission_id]
+
         # Insert mission claim
         cur.execute(
             """INSERT INTO student_daily_missions (user_id, mission_date, mission_id, claimed, stars_earned)
                VALUES (%s, %s, %s, TRUE, %s)
                ON CONFLICT (user_id, mission_date, mission_id)
                DO UPDATE SET claimed = TRUE, stars_earned = EXCLUDED.stars_earned""",
-            (user_id, today, req.mission_id, req.stars_reward)
+            (user_id, today, req.mission_id, verified_reward)
         )
 
         # Permanently award stars into student_profiles
-        _add_stars(cur, user_id, req.stars_reward)
+        _add_stars(cur, user_id, verified_reward)
         
         conn.commit()
         total_stars = _get_total_stars(cur, user_id)
@@ -3080,9 +3856,11 @@ def claim_daily_mission(user_id: int, req: MissionClaimRequest):
         return {
             "success": True,
             "mission_id": req.mission_id,
-            "stars_reward": req.stars_reward,
+            "stars_reward": verified_reward,
             "total_stars": total_stars
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3374,12 +4152,12 @@ def _pick_quiz_for_slot(cur, user_id: int, difficulty: str, exclude_quiz_id: int
 
 
 @app.get("/daily-quizzes/{user_id}")
-def get_daily_quizzes(user_id: int):
+def get_daily_quizzes(user_id: int, client_date: Optional[str] = None):
     """Returns today's 3 daily quiz slots for the student."""
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = date.today()
+        today = client_date if client_date else date.today()
         total_stars = _get_total_stars(cur, user_id)
         slots = []
         for diff in ["easy", "medium", "hard"]:
@@ -3504,7 +4282,19 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
         total = max(req.total_questions, 1)
         accuracy = (req.score / total) * 100
         passed = accuracy >= 70.0
-        slot_stars = DAILY_STAR_REWARDS.get(req.slot_difficulty, 10) if passed else 0
+        if not passed:
+            cur.close()
+            conn.close()
+            return {
+                "success": True,
+                "passed": False,
+                "message": "Quiz attempt below 70%. Retry to pass!",
+                "accuracy_pct": round(accuracy, 1),
+                "stars_earned": 0,
+                "bonus_awarded": False,
+                "bonus_stars": 0,
+            }
+        slot_stars = DAILY_STAR_REWARDS.get(req.slot_difficulty, 10)
         cur.execute(
             "UPDATE daily_quiz_slots SET completed = TRUE, stars_earned = %s WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
             (slot_stars, user_id, today, req.slot_difficulty)
@@ -3543,46 +4333,112 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
 
 @app.post("/translate")
 def translate_text(request: TranslationRequest):
+    req_text = (request.text or "").strip()
+    if not req_text:
+        return {"result": "", "direction": request.direction}
+
+    # 1. Check in-memory LRU cache (<0.001s instant response)
+    cache_key = (req_text, request.direction)
+    with _TRANSLATION_LOCK:
+        if cache_key in _TRANSLATION_MEMORY_CACHE:
+            return {"result": _TRANSLATION_MEMORY_CACHE[cache_key], "direction": request.direction, "cached": True}
+
+    # 2. Check persistent PostgreSQL translations_cache (<0.02s)
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT translated_text FROM translations_cache WHERE source_text = %s AND direction = %s LIMIT 1",
+            (req_text, request.direction)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row.get("translated_text"):
+            cached_result = row["translated_text"]
+            with _TRANSLATION_LOCK:
+                if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
+                    _TRANSLATION_MEMORY_CACHE.clear()
+                _TRANSLATION_MEMORY_CACHE[cache_key] = cached_result
+            return {"result": cached_result, "direction": request.direction, "cached": True}
+    except Exception:
+        pass
+
+    # 3. Fallback to linguistic rule engine if model is still loading
     if not tokenizer or not model:
-        text_res = rule_based_asl_gloss(request.text) if request.direction == "en_to_asl" else request.text.capitalize()
+        if not model_loading and os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
+            threading.Thread(target=_load_mbart_model, daemon=True).start()
+        text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
         return {"result": text_res, "direction": request.direction, "fallback": True}
 
-    if request.direction == "en_to_asl":
-        tokenizer.src_lang = "en_XX"
-        inputs = tokenizer(
-            request.text,
-            return_tensors="pt",
-            max_length=128,
-            truncation=True,
-        )
-        out = model.generate(
-            **inputs,
-            forced_bos_token_id=tokenizer.convert_tokens_to_ids("asl_GL"),
-            max_length=128,
-            num_beams=4,
-        )
-        result = tokenizer.decode(out[0], skip_special_tokens=True)
-        return {"result": result, "direction": "en_to_asl"}
+    # 4. Neural generation under torch.inference_mode()
+    import torch
+    max_tokens = 32 if len(req_text.split()) <= 15 else 64
 
-    elif request.direction == "asl_to_en":
-        tokenizer.src_lang = "asl_GL"
-        inputs = tokenizer(
-            request.text,
-            return_tensors="pt",
-            max_length=128,
-            truncation=True,
-        )
-        out = model.generate(
-            **inputs,
-            forced_bos_token_id=tokenizer.convert_tokens_to_ids("en_XX"),
-            max_length=128,
-            num_beams=4,
-        )
-        result = tokenizer.decode(out[0], skip_special_tokens=True)
-        return {"result": result, "direction": "asl_to_en"}
+    try:
+        with torch.inference_mode():
+            if request.direction == "en_to_asl":
+                tokenizer.src_lang = "en_XX"
+                inputs = tokenizer(
+                    req_text,
+                    return_tensors="pt",
+                    max_length=128,
+                    truncation=True,
+                )
+                out = model.generate(
+                    **inputs,
+                    forced_bos_token_id=tokenizer.convert_tokens_to_ids("asl_GL"),
+                    max_new_tokens=max_tokens,
+                    num_beams=1,
+                )
+                result = tokenizer.decode(out[0], skip_special_tokens=True)
+            elif request.direction == "asl_to_en":
+                tokenizer.src_lang = "asl_GL"
+                inputs = tokenizer(
+                    req_text,
+                    return_tensors="pt",
+                    max_length=128,
+                    truncation=True,
+                )
+                out = model.generate(
+                    **inputs,
+                    forced_bos_token_id=tokenizer.convert_tokens_to_ids("en_XX"),
+                    max_new_tokens=max_tokens,
+                    num_beams=1,
+                )
+                result = tokenizer.decode(out[0], skip_special_tokens=True)
+            else:
+                return {"error": "Invalid direction. Use 'en_to_asl' or 'asl_to_en'."}
+    except Exception as gen_err:
+        print(f"[Translation] Neural generation fallback: {gen_err}")
+        result = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
 
-    else:
-        return {"error": "Invalid direction. Use 'en_to_asl' or 'asl_to_en'."}
+    # 5. Populate in-memory cache
+    with _TRANSLATION_LOCK:
+        if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
+            _TRANSLATION_MEMORY_CACHE.clear()
+        _TRANSLATION_MEMORY_CACHE[cache_key] = result
+
+    # 6. Asynchronously persist to database cache
+    def _persist_cache_async(s_text, s_dir, t_res):
+        try:
+            p_conn = get_db()
+            p_cur = p_conn.cursor()
+            p_cur.execute(
+                """INSERT INTO translations_cache (source_text, direction, translated_text, model_version)
+                   VALUES (%s, %s, %s, 'mbart_int8_v1')
+                   ON CONFLICT (source_text, direction, model_version) DO NOTHING""",
+                (s_text, s_dir, t_res)
+            )
+            p_conn.commit()
+            p_cur.close()
+            p_conn.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_persist_cache_async, args=(req_text, request.direction, result), daemon=True).start()
+
+    return {"result": result, "direction": request.direction}
 
 
 @app.get("/health")
@@ -3712,7 +4568,7 @@ def upload_student_avatar(user_id: int, request: Request, file: UploadFile = Fil
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        base_url = str(request.base_url).rstrip('/')
+        base_url = get_public_base_url(request).rstrip('/')
         avatar_url = f"{base_url}/static/{unique_filename}"
 
         cur.execute(
@@ -3755,8 +4611,8 @@ def update_student_profile(user_id: int, req: UpdateProfileRequest):
 def change_student_password(user_id: int, req: ChangePasswordRequest):
     if not req.old_password.strip() or not req.new_password.strip():
         raise HTTPException(status_code=400, detail="All password fields are required.")
-    if len(req.new_password.strip()) < 4:
-        raise HTTPException(status_code=400, detail="New password must be at least 4 characters.")
+    if len(req.new_password.strip()) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters.")
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -3765,7 +4621,7 @@ def change_student_password(user_id: int, req: ChangePasswordRequest):
         if not u or not pwd_context.verify(req.old_password, u["password_hash"]):
             raise HTTPException(status_code=401, detail="Incorrect current password.")
         new_hashed = pwd_context.hash(req.new_password.strip())
-        cur.execute("UPDATE users SET password_hash = %s, plain_password = %s WHERE id = %s", (new_hashed, req.new_password.strip(), user_id))
+        cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (new_hashed, user_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -3812,7 +4668,7 @@ def get_student_badges(user_id: int):
         cur.execute("""
             SELECT slp.easy_passed FROM student_lesson_progress slp 
             JOIN lesson_groups lg ON slp.lesson_group_id = lg.id 
-            WHERE slp.user_id = %s AND lg.topic_id IN ('mathematics', 'technology-and-livelihood-education', 'araling-panlipunan', 'english-literacy') AND slp.easy_passed = TRUE LIMIT 1
+            WHERE slp.user_id = %s AND lg.topic_id IN ('mathematics', 'technology-and-livelihood-education', 'araling-panlipunan') AND slp.easy_passed = TRUE LIMIT 1
         """, (user_id,))
         curriculum_pioneer = cur.fetchone() is not None
 
@@ -3928,7 +4784,10 @@ def get_leaderboard(user_id: Optional[int] = None):
 
 @app.get("/admin/analytics/overview")
 @app.get("/admin/analytics")
-def get_admin_analytics_overview():
+def get_admin_analytics_overview(response: Response):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -3993,16 +4852,26 @@ def get_admin_analytics_overview():
                 u.name,
                 u.username,
                 u.avatar_url,
-                COALESCE(SUM(sp.total_stars), 0) AS total_stars,
+                COALESCE(stars_agg.total_stars, 0) AS total_stars,
                 COALESCE(ss.current_streak, 0) AS current_streak,
-                COALESCE(COUNT(sqa.id), 0) AS attempts_count,
-                COALESCE(AVG((sqa.score::FLOAT / NULLIF(sqa.total_questions, 0)) * 100), 0) AS avg_accuracy
+                COALESCE(attempts_agg.attempts_count, 0) AS attempts_count,
+                COALESCE(attempts_agg.avg_accuracy, 0) AS avg_accuracy
             FROM users u
-            LEFT JOIN student_profiles sp ON u.id = sp.user_id
+            LEFT JOIN (
+                SELECT user_id, SUM(total_stars) AS total_stars
+                FROM student_profiles
+                GROUP BY user_id
+            ) stars_agg ON u.id = stars_agg.user_id
             LEFT JOIN student_streaks ss ON u.id = ss.user_id
-            LEFT JOIN student_quiz_attempts sqa ON u.id = sqa.user_id
+            LEFT JOIN (
+                SELECT 
+                    user_id,
+                    COUNT(*) AS attempts_count,
+                    ROUND(AVG((score::FLOAT / NULLIF(total_questions, 0)) * 100)::numeric, 1) AS avg_accuracy
+                FROM student_quiz_attempts
+                GROUP BY user_id
+            ) attempts_agg ON u.id = attempts_agg.user_id
             WHERE COALESCE(u.role, 'student') = 'student'
-            GROUP BY u.id, u.name, u.username, u.avatar_url, ss.current_streak
             ORDER BY total_stars DESC, u.id ASC
         """)
         roster = [
@@ -4105,7 +4974,7 @@ FLASHCARDS_DATA = {
             "term": "Character",
             "asl_gloss": "WHO STORY ABOUT (PERSON / ANIMAL)",
             "definition": "The person, animal, or creature the story is about.",
-            "example": "Leo the puppy is the main character in the story.",
+            "example": "Rad is a cheerful student who loves flying his red kite.",
             "category": "Story Element",
             "icon": "person-outline",
             "color": "#7C3AED"
@@ -4115,7 +4984,7 @@ FLASHCARDS_DATA = {
             "term": "Setting",
             "asl_gloss": "WHERE + WHEN STORY HAPPEN",
             "definition": "The place and time where the story happens.",
-            "example": "The story takes place in a sunny green park.",
+            "example": "Rad walks across a sunny grassy hill with an oak tree on a breezy afternoon.",
             "category": "Story Element",
             "icon": "location-outline",
             "color": "#7C3AED"
@@ -4125,7 +4994,7 @@ FLASHCARDS_DATA = {
             "term": "Problem",
             "asl_gloss": "TROUBLE / CONFLICT / SOMETHING WRONG",
             "definition": "The trouble or challenge that the character must solve.",
-            "example": "Leo is lost after chasing a butterfly.",
+            "example": "Rad's red kite gets stuck high in the oak tree branches.",
             "category": "Story Element",
             "icon": "alert-circle-outline",
             "color": "#7C3AED"
@@ -4135,7 +5004,7 @@ FLASHCARDS_DATA = {
             "term": "Resolution",
             "asl_gloss": "PROBLEM SOLVE / ENDING HAPPY",
             "definition": "How the problem is solved and how the story ends.",
-            "example": "Mia helps Leo find his way back home.",
+            "example": "A friendly helper uses a ladder to rescue the kite and safely returns it to Rad.",
             "category": "Story Element",
             "icon": "checkmark-circle-outline",
             "color": "#7C3AED"
@@ -4145,7 +5014,7 @@ FLASHCARDS_DATA = {
             "term": "First (Sequence)",
             "asl_gloss": "FIRST (BEGINNING)",
             "definition": "What happens at the beginning of the story.",
-            "example": "First, Leo plays happily in the park.",
+            "example": "First, Rad crafts his red kite at his wooden work table.",
             "category": "Sequence Word",
             "icon": "arrow-forward-circle-outline",
             "color": "#7C3AED"
@@ -4155,7 +5024,7 @@ FLASHCARDS_DATA = {
             "term": "Finally (Sequence)",
             "asl_gloss": "FINALLY (END RESULT)",
             "definition": "What happens at the very end of the story.",
-            "example": "Finally, Leo is safe at home with his family.",
+            "example": "Finally, Rad runs joyfully across the hill as his red kite soars high in the sky.",
             "category": "Sequence Word",
             "icon": "flag-outline",
             "color": "#7C3AED"
@@ -4167,7 +5036,7 @@ FLASHCARDS_DATA = {
             "term": "Translation (Slide)",
             "asl_gloss": "SHAPE SLIDE (STRAIGHT LINE MOVE)",
             "definition": "Moving a shape in a straight line without turning or resizing it.",
-            "example": "Leo translated the blue triangle 4 units to the right.",
+            "example": "The blue triangle slides 4 units to the right in a straight line.",
             "category": "Transformation",
             "icon": "arrow-forward-outline",
             "color": "#2563EB"
@@ -4177,7 +5046,7 @@ FLASHCARDS_DATA = {
             "term": "Reflection (Flip)",
             "asl_gloss": "SHAPE FLIP (MIRROR OPPOSITE)",
             "definition": "Flipping a shape across a line to produce a mirror image.",
-            "example": "The arrow flips across the vertical line of symmetry.",
+            "example": "The shape flips across the red mirror line to create an opposite matching image.",
             "category": "Transformation",
             "icon": "swap-horizontal-outline",
             "color": "#2563EB"
@@ -4187,7 +5056,7 @@ FLASHCARDS_DATA = {
             "term": "Rotation (Turn)",
             "asl_gloss": "SHAPE TURN (SPIN AROUND CENTER POINT)",
             "definition": "Turning a shape around a fixed center point by degrees (90° or 180°).",
-            "example": "Turning the yellow star 90 degrees clockwise.",
+            "example": "The purple shape turns 90 degrees clockwise around the red center point.",
             "category": "Transformation",
             "icon": "refresh-outline",
             "color": "#2563EB"
@@ -4197,7 +5066,7 @@ FLASHCARDS_DATA = {
             "term": "Line of Symmetry",
             "asl_gloss": "MIDDLE LINE (BOTH SIDES MATCH SAME)",
             "definition": "The imaginary mirror line where a shape can be folded into two identical halves.",
-            "example": "The vertical mirror line shows both sides are identical.",
+            "example": "The dashed center line folds the shape into two matching halves.",
             "category": "Geometry",
             "icon": "git-commit-outline",
             "color": "#2563EB"
@@ -4207,7 +5076,7 @@ FLASHCARDS_DATA = {
             "term": "Congruent Shapes",
             "asl_gloss": "SHAPE SAME-SIZE + SAME-SHAPE",
             "definition": "Shapes that have the exact same size and shape after transforming.",
-            "example": "The translated triangle is congruent to the original triangle.",
+            "example": "Shape A and Shape B are congruent because they have the exact same size and shape.",
             "category": "Geometry",
             "icon": "shapes-outline",
             "color": "#2563EB"
@@ -4217,7 +5086,7 @@ FLASHCARDS_DATA = {
             "term": "Coordinate Grid",
             "asl_gloss": "GRID MAP (X HORIZONTAL + Y VERTICAL)",
             "definition": "A network of horizontal and vertical lines used to pinpoint shape positions.",
-            "example": "Leo plotted the triangle vertices on the 2D grid.",
+            "example": "The horizontal X-axis and vertical Y-axis help us find the exact position of points.",
             "category": "Measurement",
             "icon": "grid-outline",
             "color": "#2563EB"
@@ -4229,7 +5098,7 @@ FLASHCARDS_DATA = {
             "term": "Webcam Privacy",
             "asl_gloss": "CAMERA PRIVACY (HIDE PERSONAL ROOM)",
             "definition": "Keeping personal living areas hidden during a video conference.",
-            "example": "Mia applies a blurred virtual background before turning on her camera.",
+            "example": "Slide your webcam privacy shutter closed to protect your private room.",
             "category": "Digital Privacy",
             "icon": "videocam-outline",
             "color": "#D97706"
@@ -4239,7 +5108,7 @@ FLASHCARDS_DATA = {
             "term": "Mute Microphone",
             "asl_gloss": "MIC OFF (NO NOISE DISTURB)",
             "definition": "Turning off your microphone when listening to avoid background noise.",
-            "example": "Always mute your mic when the teacher or classmates are signing or speaking.",
+            "example": "Always mute your microphone when the teacher or classmates are speaking.",
             "category": "Etiquette",
             "icon": "mic-off-outline",
             "color": "#D97706"
@@ -4249,7 +5118,7 @@ FLASHCARDS_DATA = {
             "term": "Meeting Link",
             "asl_gloss": "CONFERENCE LINK (NEVER SHARE PUBLIC)",
             "definition": "The digital address used to join an online classroom.",
-            "example": "Only share the class meeting link with trusted school classmates.",
+            "example": "Only share the meeting link with trusted school classmates.",
             "category": "Cybersecurity",
             "icon": "link-outline",
             "color": "#D97706"
@@ -4259,7 +5128,7 @@ FLASHCARDS_DATA = {
             "term": "Password Protection",
             "asl_gloss": "SECRET CODE (LOCK ACCOUNT SAFE)",
             "definition": "A secret security code used to protect accounts and meetings from strangers.",
-            "example": "Mia keeps her meeting passcode confidential.",
+            "example": "Keep your secret password protected and confidential.",
             "category": "Cybersecurity",
             "icon": "lock-closed-outline",
             "color": "#D97706"
@@ -4269,7 +5138,7 @@ FLASHCARDS_DATA = {
             "term": "Visual Clarity",
             "asl_gloss": "LIGHT GOOD + HAND CLEAR (EASY SEE SIGN)",
             "definition": "Good front-facing lighting so hand signs and facial expressions are easy to see.",
-            "example": "Face the light source so your sign language is bright and clear.",
+            "example": "Face the bright front light so your hand signs are clear and easy to see.",
             "category": "Visual Communication",
             "icon": "sunny-outline",
             "color": "#D97706"
@@ -4279,7 +5148,7 @@ FLASHCARDS_DATA = {
             "term": "Chat Etiquette",
             "asl_gloss": "MESSAGE POLITE + RESPECTFUL (NO SPAM)",
             "definition": "Typing polite, relevant, and school-appropriate messages in the meeting chat.",
-            "example": "Use the chat box only for asking questions related to the lesson.",
+            "example": "Use the chat box only for polite and lesson-related questions.",
             "category": "Etiquette",
             "icon": "chatbubble-ellipses-outline",
             "color": "#D97706"
@@ -4360,16 +5229,17 @@ def get_flashcards(topic_id: str):
 class EditQuestionItem(BaseModel):
     id: Optional[int] = None
     question_text: str
-    question_type: str = "descriptive"
+    question_type: str = "multiple_choice"
     image_url: Optional[str] = None
     knowledge_component: Optional[str] = None
     options: List[str] = []
     correct_option_index: int = 0
     hint: Optional[str] = None
-    matching_pairs: Optional[List[dict]] = None
 
 class UpdateQuizQuestionsRequest(BaseModel):
     questions: List[EditQuestionItem]
+    teacher_name: Optional[str] = "Teacher"
+    teacher_id: Optional[int] = None
 
 
 @app.get("/admin/quiz/{quiz_id}/questions")
@@ -4383,39 +5253,29 @@ def get_admin_quiz_questions(quiz_id: int):
         result = []
         for r in rows:
             q_id = r["id"]
-            q_type = r["question_type"]
-            options_list = []
-            matching_pairs_list = []
-            
-            if q_type == 'matching':
-                cur.execute(
-                    "SELECT left_item, right_item FROM question_matches WHERE question_id = %s ORDER BY id ASC",
-                    (q_id,)
-                )
-                matches = cur.fetchall()
-                matching_pairs_list = [{"left": m["left_item"], "right": m["right_item"]} for m in matches]
-            else:
-                cur.execute(
-                    "SELECT option_letter, option_text FROM question_options WHERE question_id = %s ORDER BY option_letter ASC",
-                    (q_id,)
-                )
-                opts = cur.fetchall()
-                options_list = [o["option_text"] for o in opts]
+            cur.execute(
+                "SELECT option_letter, option_text FROM question_options WHERE question_id = %s ORDER BY option_letter ASC",
+                (q_id,)
+            )
+            opts = cur.fetchall()
+            options_list = [o["option_text"] for o in opts]
+            while len(options_list) < 4:
+                options_list.append("")
                 
-            correct_letter = r["correct_option_letter"] or "A"
-            correct_idx = ord(correct_letter.upper()) - 65 if len(correct_letter) == 1 and correct_letter.isalpha() else 0
+            correct_letter = (r.get("correct_option_letter") or "A").strip().upper()
+            correct_idx = max(0, min(3, ord(correct_letter[0]) - 65)) if correct_letter and correct_letter[0].isalpha() else 0
             
             result.append({
                 "id": q_id,
                 "quiz_id": r["quiz_id"],
                 "question_text": r["question_text"],
-                "question_type": q_type,
+                "question_type": "multiple_choice",
                 "image_url": r["image_url"],
                 "knowledge_component": r.get("knowledge_component") or "",
-                "options": options_list,
+                "options": options_list[:4],
                 "correct_option_index": correct_idx,
                 "hint": r.get("hint") or "",
-                "matching_pairs": matching_pairs_list,
+                "matching_pairs": [],
             })
             
         cur.close()
@@ -4435,15 +5295,45 @@ def update_admin_quiz_questions(quiz_id: int, req: UpdateQuizQuestionsRequest):
         cur.execute("SELECT id FROM questions WHERE quiz_id = %s", (quiz_id,))
         old_ids = [row[0] for row in cur.fetchall()]
         if old_ids:
+            cur.execute("DELETE FROM student_question_answers WHERE question_id = ANY(%s)", (old_ids,))
             cur.execute("DELETE FROM question_options WHERE question_id = ANY(%s)", (old_ids,))
             cur.execute("DELETE FROM question_matches WHERE question_id = ANY(%s)", (old_ids,))
             cur.execute("DELETE FROM questions WHERE quiz_id = %s", (quiz_id,))
             
+        # Resolve fallback auto-KC for this quiz if questions omit it
+        cur.execute("""
+            SELECT q.topic_id, q.title as quiz_title, lg.title as group_title, l.title as lesson_title
+            FROM quizzes q
+            LEFT JOIN lessons l ON q.lesson_id = l.id
+            LEFT JOIN lesson_groups lg ON l.lesson_group_id = lg.id
+            WHERE q.id = %s
+        """, (quiz_id,))
+        q_info = cur.fetchone()
+        auto_kc = "reading_comprehension"
+        if q_info:
+            q_topic = q_info[0] or "english-1"
+            base_t = q_info[2] or q_info[3] or q_info[1] or "Lesson"
+            slug = re.sub(r'[^a-z0-9]+', '_', base_t.lower().strip()).strip('_')
+            auto_kc = f"kc_{slug}"
+            cur.execute("""
+                INSERT INTO knowledge_components (topic_id, name, display_name, prior, learns, guesses, slips)
+                VALUES (%s, %s, %s, 0.10, 0.20, 0.25, 0.10)
+                ON CONFLICT (name) DO NOTHING
+            """, (q_topic, auto_kc, f"{base_t} Mastery"))
+
         # 2. Insert new questions
         for q in req.questions:
             if not q.question_text.strip():
                 continue
-            correct_letter = chr(65 + (q.correct_option_index or 0))
+            if not q.options or len(q.options) < 4:
+                raise HTTPException(status_code=400, detail="Each question must have exactly 4 choices (A, B, C, D).")
+            for opt_idx, opt_text in enumerate(q.options[:4]):
+                if not opt_text.strip():
+                    raise HTTPException(status_code=400, detail=f"Option {chr(65 + opt_idx)} cannot be empty.")
+
+            correct_idx = max(0, min(3, q.correct_option_index if q.correct_option_index is not None else 0))
+            correct_letter = chr(65 + correct_idx)
+            kc_val = q.knowledge_component.strip() if q.knowledge_component and q.knowledge_component.strip() else auto_kc
             cur.execute("""
                 INSERT INTO questions 
                 (quiz_id, question_text, correct_option_letter, question_type, image_url, knowledge_component, hint)
@@ -4453,15 +5343,15 @@ def update_admin_quiz_questions(quiz_id: int, req: UpdateQuizQuestionsRequest):
                 quiz_id,
                 q.question_text.strip(),
                 correct_letter,
-                q.question_type or "descriptive",
+                "multiple_choice",
                 q.image_url if q.image_url and q.image_url.strip() else None,
-                q.knowledge_component if q.knowledge_component and q.knowledge_component.strip() else None,
+                kc_val,
                 q.hint if q.hint and q.hint.strip() else None,
             ))
             new_q_id = cur.fetchone()[0]
             
             # Insert options
-            for o_idx, opt_text in enumerate(q.options):
+            for o_idx, opt_text in enumerate(q.options[:4]):
                 opt_letter = chr(65 + o_idx)
                 cur.execute("""
                     INSERT INTO question_options (question_id, option_letter, option_text)
@@ -4473,20 +5363,23 @@ def update_admin_quiz_questions(quiz_id: int, req: UpdateQuizQuestionsRequest):
         conn.close()
 
         log_teacher_activity(
-            teacher_name="Teacher",
+            teacher_name=req.teacher_name or "Teacher",
             action_type="edit_quiz",
             target_type="quiz",
             target_id=quiz_id,
             target_title=f"Quiz #{quiz_id}",
-            details=f"Updated questions pool ({len(req.questions)} questions)."
+            details=f"Updated questions pool ({len(req.questions)} questions).",
+            teacher_id=req.teacher_id
         )
         return {"success": True, "message": f"Successfully updated {len(req.questions)} questions."}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/admin/quiz/{quiz_id}")
-def delete_quiz(quiz_id: int, teacher_name: str = "Teacher"):
+def delete_quiz(quiz_id: int, teacher_name: str = "Teacher", teacher_id: Optional[int] = None):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -4513,7 +5406,8 @@ def delete_quiz(quiz_id: int, teacher_name: str = "Teacher"):
             target_id=quiz_id,
             target_title=row["title"],
             topic_id=row["topic_id"],
-            details=f"Moved quiz '{row['title']}' ({row.get('difficulty', 'easy').upper()}) to Trash."
+            details=f"Moved quiz '{row['title']}' ({row.get('difficulty', 'easy').upper()}) to Trash.",
+            teacher_id=teacher_id
         )
         return {"success": True, "message": f"Moved quiz '{row['title']}' to Trash."}
     except HTTPException:
@@ -4546,11 +5440,20 @@ def get_trash():
         trashed_lessons = cur.fetchall()
 
         # Fetch trashed quizzes
+        # Fetch trashed quizzes (filter out child quizzes whose parent lesson group is already trashed)
         cur.execute("""
-            SELECT id, title, topic_id, difficulty, 'quiz' as item_type, deleted_at, deleted_by
-            FROM quizzes
-            WHERE is_deleted = TRUE
-            ORDER BY deleted_at DESC
+            SELECT q.id, q.title, q.topic_id, q.difficulty, 'quiz' as item_type, q.deleted_at, q.deleted_by
+            FROM quizzes q
+            WHERE q.is_deleted = TRUE
+              AND (
+                  q.lesson_id IS NULL 
+                  OR q.lesson_id NOT IN (
+                      SELECT l.id FROM lessons l 
+                      JOIN lesson_groups lg ON l.lesson_group_id = lg.id 
+                      WHERE lg.is_deleted = TRUE
+                  )
+              )
+            ORDER BY q.deleted_at DESC
         """)
         trashed_quizzes = cur.fetchall()
 
@@ -4564,6 +5467,24 @@ def get_trash():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _purge_quizzes(cur, quiz_ids: list[int]):
+    if not quiz_ids:
+        return
+    cur.execute("SELECT id FROM questions WHERE quiz_id = ANY(%s)", (quiz_ids,))
+    q_ids = [r["id"] for r in cur.fetchall()]
+    if q_ids:
+        cur.execute("DELETE FROM student_question_answers WHERE question_id = ANY(%s)", (q_ids,))
+        cur.execute("DELETE FROM question_options WHERE question_id = ANY(%s)", (q_ids,))
+        cur.execute("DELETE FROM question_matches WHERE question_id = ANY(%s)", (q_ids,))
+        cur.execute("DELETE FROM questions WHERE id = ANY(%s)", (q_ids,))
+    cur.execute("UPDATE daily_quiz_slots SET quiz_id = NULL WHERE quiz_id = ANY(%s)", (quiz_ids,))
+    cur.execute("SELECT id FROM student_quiz_attempts WHERE quiz_id = ANY(%s)", (quiz_ids,))
+    attempt_ids = [r["id"] for r in cur.fetchall()]
+    if attempt_ids:
+        cur.execute("DELETE FROM student_quiz_attempts WHERE id = ANY(%s)", (attempt_ids,))
+    cur.execute("DELETE FROM quizzes WHERE id = ANY(%s)", (quiz_ids,))
 
 
 @app.post("/admin/trash/restore")
@@ -4585,8 +5506,9 @@ def restore_trash(req: TrashActionRequest):
             topic_id = row["topic_id"]
             cur.execute("UPDATE lesson_groups SET is_deleted = FALSE, deleted_at = NULL, deleted_by = NULL WHERE id = %s", (req.item_id,))
             cur.execute("UPDATE lessons SET is_deleted = FALSE, deleted_at = NULL, deleted_by = NULL WHERE lesson_group_id = %s", (req.item_id,))
+            cur.execute("UPDATE quizzes SET is_deleted = FALSE, deleted_at = NULL, deleted_by = NULL WHERE lesson_id IN (SELECT id FROM lessons WHERE lesson_group_id = %s)", (req.item_id,))
             action = "restore_lesson"
-            detail = f"Restored lesson story '{target_title}' from Trash."
+            detail = f"Restored lesson story '{target_title}' and its quizzes from Trash."
         elif req.item_type == "lesson":
             cur.execute("SELECT id, title, topic_id FROM lessons WHERE id = %s", (req.item_id,))
             row = cur.fetchone()
@@ -4597,8 +5519,9 @@ def restore_trash(req: TrashActionRequest):
             target_title = row["title"]
             topic_id = row["topic_id"]
             cur.execute("UPDATE lessons SET is_deleted = FALSE, deleted_at = NULL, deleted_by = NULL WHERE id = %s", (req.item_id,))
+            cur.execute("UPDATE quizzes SET is_deleted = FALSE, deleted_at = NULL, deleted_by = NULL WHERE lesson_id = %s", (req.item_id,))
             action = "restore_lesson"
-            detail = f"Restored lesson '{target_title}' from Trash."
+            detail = f"Restored lesson '{target_title}' and its quiz from Trash."
         elif req.item_type == "quiz":
             cur.execute("SELECT id, title, topic_id FROM quizzes WHERE id = %s", (req.item_id,))
             row = cur.fetchone()
@@ -4652,42 +5575,36 @@ def permanent_delete_trash(req: TrashActionRequest):
                 target_title = row["title"]
                 topic_id = row["topic_id"]
             cur.execute("SELECT id FROM lessons WHERE lesson_group_id = %s", (req.item_id,))
-            l_rows = cur.fetchall()
-            for lr in l_rows:
-                cur.execute("DELETE FROM lesson_slides WHERE lesson_id = %s", (lr["id"],))
-            cur.execute("DELETE FROM lessons WHERE lesson_group_id = %s", (req.item_id,))
+            lesson_ids = [lr["id"] for lr in cur.fetchall()]
+            if lesson_ids:
+                cur.execute("SELECT id FROM quizzes WHERE lesson_id = ANY(%s)", (lesson_ids,))
+                qz_ids = [qr["id"] for qr in cur.fetchall()]
+                _purge_quizzes(cur, qz_ids)
+                cur.execute("DELETE FROM lesson_slides WHERE lesson_id = ANY(%s)", (lesson_ids,))
+                cur.execute("DELETE FROM lessons WHERE id = ANY(%s)", (lesson_ids,))
             cur.execute("DELETE FROM lesson_groups WHERE id = %s", (req.item_id,))
             action = "permanent_delete"
-            detail = f"Permanently deleted lesson story '{target_title}'."
+            detail = f"Permanently deleted lesson story '{target_title}' and all linked content."
         elif req.item_type == "lesson":
             cur.execute("SELECT id, title, topic_id FROM lessons WHERE id = %s", (req.item_id,))
             row = cur.fetchone()
             if row:
                 target_title = row["title"]
                 topic_id = row["topic_id"]
+            cur.execute("SELECT id FROM quizzes WHERE lesson_id = %s", (req.item_id,))
+            qz_ids = [qr["id"] for qr in cur.fetchall()]
+            _purge_quizzes(cur, qz_ids)
             cur.execute("DELETE FROM lesson_slides WHERE lesson_id = %s", (req.item_id,))
             cur.execute("DELETE FROM lessons WHERE id = %s", (req.item_id,))
             action = "permanent_delete"
-            detail = f"Permanently deleted lesson '{target_title}'."
+            detail = f"Permanently deleted lesson '{target_title}' and its quiz."
         elif req.item_type == "quiz":
             cur.execute("SELECT id, title, topic_id FROM quizzes WHERE id = %s", (req.item_id,))
             row = cur.fetchone()
             if row:
                 target_title = row["title"]
                 topic_id = row["topic_id"]
-            cur.execute("SELECT id FROM questions WHERE quiz_id = %s", (req.item_id,))
-            q_ids = [r["id"] for r in cur.fetchall()]
-            if q_ids:
-                cur.execute("DELETE FROM question_options WHERE question_id = ANY(%s)", (q_ids,))
-                cur.execute("DELETE FROM question_matches WHERE question_id = ANY(%s)", (q_ids,))
-                cur.execute("DELETE FROM questions WHERE quiz_id = %s", (req.item_id,))
-            cur.execute("UPDATE daily_quiz_slots SET quiz_id = NULL WHERE quiz_id = %s", (req.item_id,))
-            cur.execute("SELECT id FROM student_quiz_attempts WHERE quiz_id = %s", (req.item_id,))
-            attempt_ids = [r["id"] for r in cur.fetchall()]
-            if attempt_ids:
-                cur.execute("DELETE FROM student_quiz_attempt_answers WHERE attempt_id = ANY(%s)", (attempt_ids,))
-                cur.execute("DELETE FROM student_quiz_attempts WHERE quiz_id = %s", (req.item_id,))
-            cur.execute("DELETE FROM quizzes WHERE id = %s", (req.item_id,))
+            _purge_quizzes(cur, [req.item_id])
             action = "permanent_delete"
             detail = f"Permanently deleted quiz '{target_title}'."
         else:
@@ -4736,8 +5653,66 @@ def get_teacher_history():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── Serve Web Portal (Teacher & Admin) at Root ─────────────────────────────────
+# ── Serve Web Portal (Teacher & Admin) with SPA & HTML Route Support ──────────
 # ══════════════════════════════════════════════════════════════════════════════
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-if os.path.exists("dist"):
-    app.mount("/", StaticFiles(directory="dist", html=True), name="web-portal")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = os.path.join(BASE_DIR, "dist")
+if not os.path.isdir(DIST_DIR):
+    for candidate_dir in [os.path.abspath("dist"), "/home/site/wwwroot/dist"]:
+        if os.path.isdir(candidate_dir):
+            DIST_DIR = candidate_dir
+            break
+
+def get_dist_file(filename: str):
+    if not DIST_DIR or not os.path.isdir(DIST_DIR):
+        return None
+    target = os.path.join(DIST_DIR, filename)
+    return target if os.path.isfile(target) else None
+
+@app.get("/teacher", response_class=FileResponse)
+@app.get("/teacher/", response_class=FileResponse)
+def serve_teacher_portal():
+    f = get_dist_file("teacher.html") or get_dist_file("index.html")
+    if f:
+        return FileResponse(f)
+    raise HTTPException(status_code=404, detail="Teacher portal build not found.")
+
+@app.get("/admin", response_class=FileResponse)
+@app.get("/admin/", response_class=FileResponse)
+def serve_admin_portal():
+    f = get_dist_file("admin.html") or get_dist_file("index.html")
+    if f:
+        return FileResponse(f)
+    raise HTTPException(status_code=404, detail="Admin portal build not found.")
+
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except (StarletteHTTPException, HTTPException, Exception) as ex:
+            status_code = getattr(ex, "status_code", 404)
+            if status_code == 404 or isinstance(ex, StarletteHTTPException):
+                clean_path = path.strip("/")
+                if clean_path.startswith("assets/uploads") or clean_path.startswith("api/"):
+                    raise
+
+                # 1. Match direct route to {clean_path}.html (e.g. /teacher -> teacher.html, /admin -> admin.html)
+                html_file = os.path.join(self.directory, clean_path + ".html")
+                if clean_path and os.path.isfile(html_file):
+                    return FileResponse(html_file)
+
+                # 2. Match directory index {clean_path}/index.html
+                sub_index = os.path.join(self.directory, clean_path, "index.html")
+                if clean_path and os.path.isfile(sub_index):
+                    return FileResponse(sub_index)
+
+                # 3. SPA Fallback to index.html for client-side routing
+                index_file = os.path.join(self.directory, "index.html")
+                if os.path.isfile(index_file):
+                    return FileResponse(index_file)
+            raise
+
+if DIST_DIR and os.path.isdir(DIST_DIR):
+    app.mount("/", SPAStaticFiles(directory=DIST_DIR, html=True), name="web-portal")

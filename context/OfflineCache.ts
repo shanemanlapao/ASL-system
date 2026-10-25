@@ -25,9 +25,11 @@ const KEYS = {
   HOME_PREFIX: '@brightpath_cache_home_',
   FLASHCARDS_PREFIX: '@brightpath_cache_flashcards_',
   QUIZ_SESSION_PREFIX: '@brightpath_cache_quiz_session_',
+  TOPIC_QUIZZES_PREFIX: '@brightpath_cache_topic_quizzes_',
   PENDING_QUEUE: '@brightpath_pending_quiz_queue',
   KC_MASTERY_PREFIX: '@brightpath_kc_mastery_',
   KC_MASTERY_LIST_PREFIX: '@brightpath_cache_kc_mastery_list_',
+  LOCAL_STARS_PREFIX: '@brightpath_user_stars_',
 };
 
 // Generic storage helpers
@@ -89,6 +91,76 @@ export const cacheQuizSession = async (quizId: number | string, data: any): Prom
 
 export const getCachedQuizSession = async (quizId: number | string): Promise<any | null> => {
   return await getCache(`${KEYS.QUIZ_SESSION_PREFIX}${quizId}`);
+};
+
+export const cacheTopicQuizzes = async (topicId: string, quizzes: any[]): Promise<void> => {
+  await setCache(`${KEYS.TOPIC_QUIZZES_PREFIX}${topicId}`, quizzes);
+};
+
+export const getCachedTopicQuizzes = async (topicId: string): Promise<any[] | null> => {
+  return await getCache(`${KEYS.TOPIC_QUIZZES_PREFIX}${topicId}`);
+};
+
+/**
+ * Pre-caches all quizzes for a topic so they are ready for offline play.
+ * Saves each quiz under its quizId AND its lessonId (`lesson_${lessonId}`).
+ */
+export const preCacheTopicQuizzes = async (apiBaseUrl: string, topicId: string): Promise<any[] | null> => {
+  try {
+    const res = await fetch(`${apiBaseUrl}/quizzes/${topicId}`);
+    if (res.ok) {
+      const quizzes = await res.json();
+      if (Array.isArray(quizzes) && quizzes.length > 0) {
+        await cacheTopicQuizzes(topicId, quizzes);
+        for (const q of quizzes) {
+          if (q.id) {
+            await cacheQuizSession(q.id, q);
+          }
+          if (q.lesson_id) {
+            await cacheQuizSession(`lesson_${q.lesson_id}`, q);
+          }
+        }
+        return quizzes;
+      }
+    }
+  } catch (err) {
+    console.log('[OfflineCache] preCacheTopicQuizzes error:', err);
+  }
+  return null;
+};
+
+// ── Local Star Balance Storage ──────────────────────────────────────────────
+
+export const saveLocalTotalStars = async (userId: number, stars: number): Promise<void> => {
+  await setCache(`${KEYS.LOCAL_STARS_PREFIX}${userId}`, stars);
+};
+
+export const getLocalTotalStars = async (userId: number): Promise<number> => {
+  const stars = await getCache<number>(`${KEYS.LOCAL_STARS_PREFIX}${userId}`);
+  if (typeof stars === 'number') return stars;
+  const home = await getCachedHomeSummary(userId);
+  if (home && typeof home.total_stars === 'number') {
+    await saveLocalTotalStars(userId, home.total_stars);
+    return home.total_stars;
+  }
+  return 0;
+};
+
+export const addLocalStars = async (userId: number, deltaStars: number): Promise<number> => {
+  const current = await getLocalTotalStars(userId);
+  const updated = Math.max(0, current + deltaStars);
+  await saveLocalTotalStars(userId, updated);
+
+  // Keep home summary cache in sync
+  try {
+    const home = await getCachedHomeSummary(userId);
+    if (home) {
+      home.total_stars = updated;
+      await cacheHomeSummary(userId, home);
+    }
+  } catch {}
+
+  return updated;
 };
 
 // ── Pending Quiz Queue for Offline Submissions ──────────────────────────────

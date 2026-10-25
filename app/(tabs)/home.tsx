@@ -15,8 +15,9 @@ import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
 import PermissionModal from '../../components/PermissionModal';
 import { useSubjects } from '../../context/SubjectsContext';
-import { API_URL } from '../../context/config';
+import { API_URL, resolveMediaUrl } from '../../context/config';
 import { COLORS } from '../../context/theme';
+import { useAccessibility } from '../../context/AccessibilityContext';
 import {
   cacheHomeSummary,
   getCachedHomeSummary,
@@ -32,30 +33,35 @@ const getSubjectTheme = (topicId: string) => {
         color: COLORS.storyGrammar,
         bg: COLORS.storyGrammarBg,
         icon: 'book' as const,
+        image: require('../../assets/images/english-subject.jpg'),
       };
     case 'mathematics':
       return {
         color: COLORS.mathematics,
         bg: COLORS.mathematicsBg,
         icon: 'shapes' as const,
+        image: require('../../assets/images/math-subject.jpg'),
       };
     case 'technology-and-livelihood-education':
       return {
         color: COLORS.tle,
         bg: COLORS.tleBg,
         icon: 'videocam' as const,
+        image: require('../../assets/images/tle-subject.jpg'),
       };
     case 'araling-panlipunan':
       return {
         color: COLORS.aralingPanlipunan,
         bg: COLORS.aralingPanlipunanBg,
         icon: 'globe' as const,
+        image: require('../../assets/images/ap-subject.jpg'),
       };
     default:
       return {
         color: COLORS.primary,
         bg: COLORS.primaryLight,
         icon: 'book' as const,
+        image: null,
       };
   }
 };
@@ -63,6 +69,7 @@ const getSubjectTheme = (topicId: string) => {
 export default function HomeScreen() {
   const { user } = useAuth();
   const { subjects } = useSubjects();
+  const { highContrast } = useAccessibility();
   const displayName = user?.name ?? 'Student';
   const userId = user?.id || 1;
   const initial = displayName.charAt(0).toUpperCase() || 'S';
@@ -195,15 +202,11 @@ export default function HomeScreen() {
         <View style={styles.headerRow}>
           <View style={styles.headerUser}>
             <View style={styles.avatarCircle}>
-              {user?.avatar_url ? (
-                <Image source={{ uri: user.avatar_url }} style={styles.avatarImage} />
-              ) : (
-                <Text style={styles.avatarText}>{initial}</Text>
-              )}
+              <Text style={styles.avatarText}>{initial}</Text>
             </View>
             <View>
-              <Text style={styles.greeting}>Hi, {displayName}!</Text>
-              <Text style={styles.subGreeting}>Ready to learn today?</Text>
+              <Text style={[styles.greeting, highContrast && { color: '#000000', fontWeight: '900' }]}>Hi, {displayName}!</Text>
+              <Text style={[styles.subGreeting, highContrast && { color: '#0F172A', fontWeight: '700' }]}>Ready to learn today?</Text>
             </View>
           </View>
 
@@ -318,9 +321,13 @@ export default function HomeScreen() {
               onPress={() => router.push(`/topic/${topic.id}?subjectId=english` as any)}
             >
               <View style={styles.subjectRow}>
-                {/* 1. Weighted Solid Icon in Soft Tinted Squircle */}
+                {/* 1. Weighted Solid Icon or Image in Soft Tinted Squircle */}
                 <View style={[styles.subjectIconBox, { backgroundColor: theme.bg }]}>
-                  <Ionicons name={theme.icon} size={24} color={theme.color} />
+                  {theme.image ? (
+                    <Image source={theme.image} style={styles.subjectImage} resizeMode="cover" />
+                  ) : (
+                    <Ionicons name={theme.icon} size={24} color={theme.color} />
+                  )}
                 </View>
 
                 {/* 2. Topic Title & Clean Meta */}
@@ -590,6 +597,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 13,
+    overflow: 'hidden',
+  },
+  subjectImage: {
+    width: '100%',
+    height: '100%',
   },
   subjectInfo: {
     flex: 1,

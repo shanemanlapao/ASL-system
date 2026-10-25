@@ -193,9 +193,11 @@ export default function DailyQuizScreen() {
       pathname: '/quiz/[id]',
       params: {
         id: String(slot.quiz_id),
+        quizId: String(slot.quiz_id),
         subjectId: subjectId ?? '',
         deafEnglish: 'false',
         mode: 'daily',
+        difficulty: slot.slot_difficulty,
         slot_difficulty: slot.slot_difficulty,
       },
     });
@@ -204,7 +206,7 @@ export default function DailyQuizScreen() {
   // -- Render -----------------------------------------------------------------
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       {fullClear && <Confetti count={50} />}
       {/* Header */}
       <View style={styles.header}>
@@ -462,7 +464,7 @@ const styles = StyleSheet.create({
   scroll: {
     paddingHorizontal: 18,
     paddingTop: 20,
-    paddingBottom: 48,
+    paddingBottom: 60,
   },
   streakCard: {
     backgroundColor: '#fff',

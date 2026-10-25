@@ -1,9 +1,20 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Image } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '../context/AuthContext';
 import { API_URL } from '../context/config';
+
+export const BADGE_IMAGES: Record<string, any> = {
+  first_step: require('../assets/images/badges/first_step.jpg'),
+  streak_master: require('../assets/images/badges/streak_master.jpg'),
+  perfect_score: require('../assets/images/badges/perfect_score.jpg'),
+  daily_champion: require('../assets/images/badges/daily_champion.jpg'),
+  story_explorer: require('../assets/images/badges/story_explorer.jpg'),
+  curriculum_pioneer: require('../assets/images/badges/curriculum_pioneer.jpg'),
+  literacy_champ: require('../assets/images/badges/curriculum_pioneer.jpg'),
+};
 
 interface Badge {
   id: string;
@@ -44,7 +55,7 @@ export default function BadgesScreen() {
   const unlockedCount = badges.filter(b => b.unlocked).length;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color="#7C3AED" />
@@ -81,18 +92,36 @@ export default function BadgesScreen() {
                   badge.unlocked ? styles.badgeCardUnlocked : styles.badgeCardLocked
                 ]}
               >
-                <View style={[
-                  styles.iconCircle,
-                  badge.unlocked
-                    ? { backgroundColor: `${badge.color}15`, borderColor: badge.color }
-                    : { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' }
-                ]}>
-                  <Ionicons
-                    name={badge.icon as any}
-                    size={30}
-                    color={badge.unlocked ? badge.color : '#9CA3AF'}
-                  />
-                </View>
+                {BADGE_IMAGES[badge.id] ? (
+                  <View style={styles.badgeImageWrapper}>
+                    <Image
+                      source={BADGE_IMAGES[badge.id]}
+                      style={[
+                        styles.badgeImage,
+                        !badge.unlocked && styles.badgeImageLocked,
+                      ]}
+                      resizeMode="cover"
+                    />
+                    {!badge.unlocked && (
+                      <View style={styles.badgeImageLockOverlay}>
+                        <Ionicons name="lock-closed" size={18} color="#FFFFFF" />
+                      </View>
+                    )}
+                  </View>
+                ) : (
+                  <View style={[
+                    styles.iconCircle,
+                    badge.unlocked
+                      ? { backgroundColor: `${badge.color}15`, borderColor: badge.color }
+                      : { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' }
+                  ]}>
+                    <Ionicons
+                      name={badge.icon as any}
+                      size={30}
+                      color={badge.unlocked ? badge.color : '#9CA3AF'}
+                    />
+                  </View>
+                )}
 
                 <View style={{ flex: 1 }}>
                   <View style={styles.badgeTitleRow}>
@@ -143,7 +172,7 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#1F2937' },
   headerSub: { fontSize: 12, color: '#6B7280', marginTop: 2 },
-  container: { padding: 20, paddingBottom: 40 },
+  container: { padding: 20, paddingBottom: 60 },
   banner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -176,6 +205,35 @@ const styles = StyleSheet.create({
   },
   badgeCardUnlocked: { borderColor: '#EDE9FE' },
   badgeCardLocked: { borderColor: '#E5E7EB', opacity: 0.7 },
+  badgeImageWrapper: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    overflow: 'hidden',
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#F3F4F6',
+  },
+  badgeImage: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+  },
+  badgeImageLocked: {
+    opacity: 0.35,
+  },
+  badgeImageLockOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(30, 41, 59, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 29,
+  },
   iconCircle: {
     width: 54,
     height: 54,

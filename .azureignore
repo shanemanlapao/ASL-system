@@ -1,0 +1,27 @@
+# Azure Deployment Ignore file
+# We intentionally DO NOT ignore dist/ so the compiled teacher portal & web app are deployed!
+node_modules/
+.expo/
+web-build/
+.kotlin/
+ios/
+android/
+app-example/
+.git/
+.github/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.log
+*.zip
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.DS_Store
+

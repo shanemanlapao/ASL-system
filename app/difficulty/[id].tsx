@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -12,13 +11,16 @@ import {
   Animated,
   Platform,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import * as Haptics from 'expo-haptics';
 import { useAuth } from "../../context/AuthContext";
-import { API_URL } from "../../context/config";
+import { API_URL, resolveMediaUrl } from "../../context/config";
 import { COLORS } from "../../context/theme";
+import { useAccessibility } from "../../context/AccessibilityContext";
 import { getCachedTopicLessons, getCachedStudentProgress } from "../../context/OfflineCache";
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // --- Types -------------------------------------------------------------------
 
@@ -83,7 +85,7 @@ export default function DifficultyScreen() {
   const theme = THEME_COLORS[topicId as string] || THEME_COLORS[subjectId as string] || THEME_COLORS['story-grammar'];
   const { user } = useAuth();
   const userId = user?.id || 1;
-
+  const { highContrast, hapticsEnabled } = useAccessibility();
   const [isDeafEnglish, setIsDeafEnglish] = useState<boolean>(deafEngParam === 'true');
   const [lessonsMap, setLessonsMap] = useState<Record<string, DBLesson>>({});
   const [groupTitle, setGroupTitle] = useState('');
@@ -203,26 +205,56 @@ export default function DifficultyScreen() {
   const slideAnim = useRef(new Animated.Value(0)).current;
   const slideOpacity = useRef(new Animated.Value(1)).current;
 
-  const handleOpenDifficulty = (diff: 'easy' | 'medium' | 'hard') => {
+  const saveSlideProgress = (lessonId: number, index: number) => {
+    AsyncStorage.setItem(`@brightpath_lesson_slide_${userId}_${lessonId}`, String(index)).catch(() => {});
+  };
+
+  const handleOpenDifficulty = async (diff: 'easy' | 'medium' | 'hard') => {
     const lesson = lessonsMap[diff];
     if (!lesson) return;
     setActiveLesson(lesson);
-    setActiveDescIndex(0);
+
+    // Restore persistent slide index if available
+    try {
+      const savedIndexStr = await AsyncStorage.getItem(`@brightpath_lesson_slide_${userId}_${lesson.id}`);
+      if (savedIndexStr !== null) {
+        const savedIndex = parseInt(savedIndexStr, 10);
+        if (!isNaN(savedIndex) && savedIndex >= 0 && savedIndex < (lesson.slides?.length || 0)) {
+          setActiveDescIndex(savedIndex);
+        } else {
+          setActiveDescIndex(0);
+        }
+      } else {
+        setActiveDescIndex(0);
+      }
+    } catch {
+      setActiveDescIndex(0);
+    }
+
     slideAnim.setValue(0);
     slideOpacity.setValue(1);
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    AsyncStorage.setItem(`@dhh_story_read_${today}`, 'true').catch(() => {});
   };
 
   const handleNextSlide = () => {
     if (!activeLesson || activeDescIndex >= activeLesson.slides.length - 1) return;
-    try {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    } catch {}
+    if (hapticsEnabled) {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      } catch {}
+    }
 
     Animated.parallel([
       Animated.timing(slideAnim, { toValue: -35, duration: 100, useNativeDriver: Platform.OS !== 'web' }),
       Animated.timing(slideOpacity, { toValue: 0, duration: 100, useNativeDriver: Platform.OS !== 'web' }),
     ]).start(() => {
-      setActiveDescIndex(prev => prev + 1);
+      setActiveDescIndex(prev => {
+        const next = prev + 1;
+        if (activeLesson) saveSlideProgress(activeLesson.id, next);
+        return next;
+      });
       slideAnim.setValue(35);
       Animated.parallel([
         Animated.timing(slideAnim, { toValue: 0, duration: 160, useNativeDriver: Platform.OS !== 'web' }),
@@ -233,15 +265,21 @@ export default function DifficultyScreen() {
 
   const handlePrevSlide = () => {
     if (!activeLesson || activeDescIndex <= 0) return;
-    try {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    } catch {}
+    if (hapticsEnabled) {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      } catch {}
+    }
 
     Animated.parallel([
       Animated.timing(slideAnim, { toValue: 35, duration: 100, useNativeDriver: Platform.OS !== 'web' }),
       Animated.timing(slideOpacity, { toValue: 0, duration: 100, useNativeDriver: Platform.OS !== 'web' }),
     ]).start(() => {
-      setActiveDescIndex(prev => prev - 1);
+      setActiveDescIndex(prev => {
+        const next = prev - 1;
+        if (activeLesson) saveSlideProgress(activeLesson.id, next);
+        return next;
+      });
       slideAnim.setValue(-35);
       Animated.parallel([
         Animated.timing(slideAnim, { toValue: 0, duration: 160, useNativeDriver: Platform.OS !== 'web' }),
@@ -285,7 +323,7 @@ export default function DifficultyScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       {/* 1. Header */}
       <View style={styles.header}>
         <TouchableOpacity style={[styles.backButton, { backgroundColor: theme.light }]} onPress={() => router.back()}>
@@ -382,7 +420,7 @@ export default function DifficultyScreen() {
           visible={!!activeLesson}
           onRequestClose={() => setActiveLesson(null)}
         >
-          <SafeAreaView style={styles.modalContainer}>
+          <SafeAreaView style={styles.modalContainer} edges={['top', 'bottom']}>
             {/* Modal Header */}
             <View style={styles.modalHeader}>
               <TouchableOpacity
@@ -399,6 +437,18 @@ export default function DifficultyScreen() {
                   {activeLesson.difficulty.toUpperCase()} TIER • SLIDE {activeDescIndex + 1} OF {activeLesson.slides.length}
                 </Text>
               </View>
+              {activeDescIndex > 0 && (
+                <TouchableOpacity
+                  style={[styles.backButton, { backgroundColor: theme.light, marginLeft: 8 }]}
+                  onPress={() => {
+                    setActiveDescIndex(0);
+                    if (activeLesson) saveSlideProgress(activeLesson.id, 0);
+                  }}
+                  accessibilityLabel="Restart from Slide 1"
+                >
+                  <Ionicons name="refresh" size={18} color={theme.primary} />
+                </TouchableOpacity>
+              )}
             </View>
 
             <View style={styles.readerContent}>
@@ -431,7 +481,7 @@ export default function DifficultyScreen() {
                 <ScrollView contentContainerStyle={styles.cardScrollView} showsVerticalScrollIndicator={false}>
                   {currentSlide?.image_url ? (
                     <View style={styles.imageWrapper}>
-                      <Image source={{ uri: currentSlide.image_url }} style={styles.slideImage} resizeMode="contain" />
+                      <Image source={{ uri: resolveMediaUrl(currentSlide.image_url) }} style={styles.slideImage} resizeMode="contain" />
                     </View>
                   ) : null}
                   <Text style={styles.cardText}>{slideText}</Text>
@@ -572,7 +622,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'android' ? 12 : 8,
+    paddingTop: 12,
     paddingBottom: 12,
     backgroundColor: COLORS.card,
     borderBottomWidth: 1,

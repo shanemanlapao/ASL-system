@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, TouchableOpacity } from "react-native";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, router } from "expo-router";
 import { useSubjects } from "../../context/SubjectsContext";
@@ -11,7 +12,7 @@ export default function SubjectScreen() {
 
   if (!subject) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.centerContainer}>
           <Text>Subject not found</Text>
           <TouchableOpacity onPress={() => router.back()} style={{ marginTop: 20 }}>
@@ -23,7 +24,7 @@ export default function SubjectScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color="#0284C7" />
@@ -95,8 +96,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 40,
-    paddingBottom: 20,
+    paddingTop: 12,
+    paddingBottom: 16,
     backgroundColor: '#F8F9FA',
   },
   backButton: {
@@ -135,7 +136,7 @@ const styles = StyleSheet.create({
   },
   scrollViewContent: {
     padding: 20,
-    paddingBottom: 40,
+    paddingBottom: 60,
   },
   categoryContainer: {
     marginBottom: 24,

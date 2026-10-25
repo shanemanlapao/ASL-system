@@ -1,19 +1,27 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
-  SafeAreaView,
   TouchableOpacity,
   ActivityIndicator,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
 import { API_URL } from '../../context/config';
 import { COLORS } from '../../context/theme';
+import { useAccessibility } from '../../context/AccessibilityContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  getLocalTotalStars,
+  saveLocalTotalStars,
+  addLocalStars,
+  getCachedHomeSummary,
+} from '../../context/OfflineCache';
 
 // --- Interfaces ---------------------------------------------------------------
 
@@ -37,46 +45,128 @@ interface StreakResponse {
   streak_broken: boolean;
 }
 
-interface Badge {
-  id: string;
-  title: string;
-  description: string;
-  icon: string;
-  color: string;
-  unlocked: boolean;
-}
-
-// Fallback sample badges if network is offline
-const DEFAULT_BADGES: Badge[] = [
-  { id: 'first_lesson', title: 'First Steps', description: 'Complete your first lesson', icon: 'ribbon', color: '#7C3AED', unlocked: true },
-  { id: 'quiz_ace', title: 'Quiz Ace', description: 'Score 100% on any quiz', icon: 'trophy', color: '#2563EB', unlocked: true },
-  { id: 'streak_3', title: '3-Day Fire', description: 'Maintain a 3-day learning streak', icon: 'flame', color: '#EA580C', unlocked: true },
-  { id: 'asl_explorer', title: 'Sign Explorer', description: 'Review 10 sign flashcards', icon: 'hand-left', color: '#0D9488', unlocked: false },
-];
-
 export default function QuestTabScreen() {
   const { user } = useAuth() as any;
+  const { highContrast } = useAccessibility();
   const userId = user?.id || 1;
 
   const [totalStars, setTotalStars] = useState<number>(0);
   const [streak, setStreak] = useState<StreakResponse | null>(null);
   const [dailyQuiz, setDailyQuiz] = useState<DailyQuizResponse | null>(null);
-  const [badges, setBadges] = useState<Badge[]>(DEFAULT_BADGES);
   const [loading, setLoading] = useState<boolean>(true);
   const [repairingStreak, setRepairingStreak] = useState<boolean>(false);
   const [claimedMissions, setClaimedMissions] = useState<Record<string, boolean>>({});
   const [claimingMission, setClaimingMission] = useState<string | null>(null);
   const [timeUntilMidnight, setTimeUntilMidnight] = useState<string>('');
+  const [storyReadDone, setStoryReadDone] = useState<boolean>(false);
+  const [flashcardsDoneCount, setFlashcardsDoneCount] = useState<number>(0);
 
-  // 12 Midnight countdown timer
+  const getLocalDateString = useCallback(() => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }, []);
+
+  // Fetch all student gamification data
+  const loadData = useCallback(async () => {
+    try {
+      const todayStr = getLocalDateString();
+
+      // 1. Read local offline activity & cached stats immediately (instant non-zero UI)
+      const [localFlashcardRaw, localStoryRaw, localClaimedRaw, cachedStars, cachedHome] = await Promise.all([
+        AsyncStorage.getItem(`@dhh_flashcards_count_${todayStr}`).catch(() => '0'),
+        AsyncStorage.getItem(`@dhh_story_read_${todayStr}`).catch(() => null),
+        AsyncStorage.getItem(`@brightpath_claimed_missions_${userId}_${todayStr}`).catch(() => null),
+        getLocalTotalStars(userId),
+        getCachedHomeSummary(userId),
+      ]);
+
+      const localFc = parseInt(localFlashcardRaw || '0', 10) || 0;
+      setFlashcardsDoneCount(localFc);
+      let isStoryDone = localStoryRaw === 'true';
+
+      const localClaimed: Record<string, boolean> = localClaimedRaw ? JSON.parse(localClaimedRaw) : {};
+      setClaimedMissions(localClaimed);
+
+      if (cachedStars > 0) {
+        setTotalStars(cachedStars);
+      } else if (cachedHome?.total_stars !== undefined) {
+        setTotalStars(cachedHome.total_stars);
+      }
+
+      if (cachedHome?.current_streak !== undefined) {
+        setStreak(prev => prev || {
+          current_streak: cachedHome.current_streak,
+          can_repair: false,
+          streak_broken: false,
+        });
+      }
+
+      // 2. Fetch server gamification data
+      const [streakRes, quizRes, summaryRes, missionsRes] = await Promise.all([
+        fetch(`${API_URL}/student/${userId}/streak?client_date=${todayStr}`).catch(() => null),
+        fetch(`${API_URL}/daily-quizzes/${userId}?client_date=${todayStr}`).catch(() => null),
+        fetch(`${API_URL}/student/${userId}/home-summary`).catch(() => null),
+        fetch(`${API_URL}/student/${userId}/daily-missions?client_date=${todayStr}`).catch(() => null),
+      ]);
+
+      if (streakRes?.ok) {
+        const sData = await streakRes.json();
+        setStreak(sData);
+      }
+      if (quizRes?.ok) {
+        const qData = await quizRes.json();
+        setDailyQuiz(qData);
+      }
+      if (missionsRes?.ok) {
+        const mData = await missionsRes.json();
+        const serverClaimed = mData.claimed_missions || {};
+        // Merge local and server claimed missions so claimed status is permanently preserved
+        const mergedClaimed = { ...localClaimed, ...serverClaimed };
+        setClaimedMissions(mergedClaimed);
+        AsyncStorage.setItem(`@brightpath_claimed_missions_${userId}_${todayStr}`, JSON.stringify(mergedClaimed)).catch(() => {});
+
+        if (mData.progress?.story >= 1) {
+          isStoryDone = true;
+        }
+        if (mData.total_stars !== undefined && mData.total_stars > 0) {
+          setTotalStars(mData.total_stars);
+          saveLocalTotalStars(userId, mData.total_stars).catch(() => {});
+        }
+      }
+      setStoryReadDone(isStoryDone);
+      if (summaryRes?.ok) {
+        const sumData = await summaryRes.json();
+        if (sumData.total_stars !== undefined) {
+          setTotalStars(sumData.total_stars);
+          saveLocalTotalStars(userId, sumData.total_stars).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.log('Error loading quest data:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [userId, getLocalDateString]);
+
+  // 12 Midnight countdown timer with dynamic day rollover refresh
   useEffect(() => {
+    let lastDate = getLocalDateString();
     const updateCountdown = () => {
       const now = new Date();
+      const currentDate = getLocalDateString();
+      if (currentDate !== lastDate) {
+        lastDate = currentDate;
+        loadData();
+      }
       const midnight = new Date();
       midnight.setHours(24, 0, 0, 0);
       const diffMs = midnight.getTime() - now.getTime();
       if (diffMs <= 0) {
         setTimeUntilMidnight('00:00:00');
+        loadData();
         return;
       }
       const h = Math.floor(diffMs / (1000 * 60 * 60));
@@ -89,54 +179,7 @@ export default function QuestTabScreen() {
     updateCountdown();
     const interval = setInterval(updateCountdown, 1000);
     return () => clearInterval(interval);
-  }, []);
-
-  // Fetch all student gamification data
-  const loadData = useCallback(async () => {
-    try {
-      const [streakRes, quizRes, badgesRes, summaryRes, missionsRes] = await Promise.all([
-        fetch(`${API_URL}/student/${userId}/streak`).catch(() => null),
-        fetch(`${API_URL}/daily-quizzes/${userId}`).catch(() => null),
-        fetch(`${API_URL}/student/${userId}/badges`).catch(() => null),
-        fetch(`${API_URL}/student/${userId}/home-summary`).catch(() => null),
-        fetch(`${API_URL}/student/${userId}/daily-missions`).catch(() => null),
-      ]);
-
-      if (streakRes?.ok) {
-        const sData = await streakRes.json();
-        setStreak(sData);
-      }
-      if (quizRes?.ok) {
-        const qData = await quizRes.json();
-        setDailyQuiz(qData);
-      }
-      if (badgesRes?.ok) {
-        const bData = await badgesRes.json();
-        if (Array.isArray(bData) && bData.length > 0) {
-          setBadges(bData);
-        }
-      }
-      if (missionsRes?.ok) {
-        const mData = await missionsRes.json();
-        if (mData.claimed_missions) {
-          setClaimedMissions(mData.claimed_missions);
-        }
-        if (mData.total_stars !== undefined && mData.total_stars > 0) {
-          setTotalStars(mData.total_stars);
-        }
-      }
-      if (summaryRes?.ok) {
-        const sumData = await summaryRes.json();
-        if (sumData.total_stars !== undefined) {
-          setTotalStars(sumData.total_stars);
-        }
-      }
-    } catch (err) {
-      console.log('Error loading quest data:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [userId]);
+  }, [getLocalDateString, loadData]);
 
   useFocusEffect(
     useCallback(() => {
@@ -166,24 +209,34 @@ export default function QuestTabScreen() {
     if (claimingMission || claimedMissions[missionId]) return;
     setClaimingMission(missionId);
 
-    // Optimistic UI update
-    setClaimedMissions(prev => ({ ...prev, [missionId]: true }));
+    const todayStr = getLocalDateString();
+    const updatedClaimed = { ...claimedMissions, [missionId]: true };
+
+    // Optimistic UI update & immediate local persistence
+    setClaimedMissions(updatedClaimed);
+    await AsyncStorage.setItem(`@brightpath_claimed_missions_${userId}_${todayStr}`, JSON.stringify(updatedClaimed)).catch(() => {});
+    await addLocalStars(userId, starsReward);
     setTotalStars(prev => prev + starsReward);
 
     try {
       const res = await fetch(`${API_URL}/student/${userId}/daily-missions/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mission_id: missionId, stars_reward: starsReward }),
+        body: JSON.stringify({
+          mission_id: missionId,
+          stars_reward: starsReward,
+          client_date: todayStr,
+        }),
       });
       if (res.ok) {
         const data = await res.json();
         if (data.total_stars !== undefined) {
           setTotalStars(data.total_stars);
+          await saveLocalTotalStars(userId, data.total_stars);
         }
       }
     } catch (err) {
-      console.log('Error claiming mission on server:', err);
+      console.log('Error claiming mission on server (retained offline):', err);
     } finally {
       setClaimingMission(null);
     }
@@ -191,15 +244,14 @@ export default function QuestTabScreen() {
 
   const completedQuizSlots = dailyQuiz?.completed_count ?? 0;
   const isQuizMissionDone = completedQuizSlots >= 1;
-  const unlockedBadgesCount = badges.filter(b => b.unlocked).length;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
       {/* 1. Sleek Compact Header Matching Brand Theme */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.headerTitle}>Missions & Trophies</Text>
-          <Text style={styles.headerSubtitle}>Complete daily quests to earn stars</Text>
+          <Text style={[styles.headerTitle, highContrast && { color: '#000000', fontWeight: '900' }]}>Quests & Missions</Text>
+          <Text style={[styles.headerSubtitle, highContrast && { color: '#0F172A', fontWeight: '700' }]}>Complete daily quests to earn stars</Text>
         </View>
 
         {/* Quick Stats Top Right */}
@@ -218,7 +270,7 @@ export default function QuestTabScreen() {
       {loading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading quests & trophies...</Text>
+          <Text style={styles.loadingText}>Loading quests...</Text>
         </View>
       ) : (
         <ScrollView
@@ -244,27 +296,49 @@ export default function QuestTabScreen() {
                 </Text>
                 <Text style={styles.streakDesc}>
                   {streak.streak_broken
-                    ? 'Streak paused! Repair now with 30 stars.'
+                    ? (totalStars >= 30
+                        ? 'Streak paused! Tap Repair to restore.'
+                        : `Streak paused! Need 30★ to repair (you have ${totalStars}★).`)
                     : 'Streak shield active! Complete 1 quest to extend.'}
                 </Text>
               </View>
 
-              {streak.streak_broken && streak.can_repair && (
-                <TouchableOpacity
-                  style={styles.repairButton}
-                  onPress={handleRepairStreak}
-                  disabled={repairingStreak}
-                  activeOpacity={0.8}
-                >
-                  {repairingStreak ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  ) : (
-                    <>
-                      <Ionicons name="construct" size={13} color="#FFFFFF" />
-                      <Text style={styles.repairButtonText}>Repair (30★)</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+              {streak.streak_broken && (
+                totalStars >= 30 ? (
+                  <TouchableOpacity
+                    style={styles.repairButton}
+                    onPress={handleRepairStreak}
+                    disabled={repairingStreak}
+                    activeOpacity={0.8}
+                  >
+                    {repairingStreak ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <>
+                        <Ionicons name="construct" size={13} color="#FFFFFF" />
+                        <Text style={styles.repairButtonText}>Repair (30★)</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.repairButton, { backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#CBD5E1' }]}
+                    onPress={() => {
+                      if (Platform.OS === 'web') {
+                        window.alert(`Streak Repair requires 30 stars. You currently have ${totalStars} stars (${30 - totalStars} more needed). Complete quizzes or daily missions to earn stars!`);
+                      } else {
+                        // React Native mobile
+                        import('react-native').then(({ Alert }) => {
+                          Alert.alert('Streak Repair', `Streak Repair requires 30 stars.\n\nYou currently have ${totalStars} stars (${30 - totalStars} more needed).\n\nComplete quizzes or daily missions to earn stars!`);
+                        });
+                      }
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="lock-closed" size={13} color="#64748B" />
+                    <Text style={[styles.repairButtonText, { color: '#64748B' }]}>{totalStars}/30★</Text>
+                  </TouchableOpacity>
+                )
               )}
             </View>
           )}
@@ -297,9 +371,9 @@ export default function QuestTabScreen() {
               <Text style={styles.missionDesc}>Read any story module lesson</Text>
               <View style={styles.missionProgressRow}>
                 <View style={styles.missionProgressBarBg}>
-                  <View style={[styles.missionProgressBarFill, { width: '100%', backgroundColor: COLORS.primary }]} />
+                  <View style={[styles.missionProgressBarFill, { width: `${storyReadDone ? 100 : 0}%`, backgroundColor: COLORS.primary }]} />
                 </View>
-                <Text style={styles.missionProgressText}>1/1</Text>
+                <Text style={styles.missionProgressText}>{storyReadDone ? '1' : '0'}/1</Text>
               </View>
             </View>
             {claimedMissions['story'] ? (
@@ -307,7 +381,7 @@ export default function QuestTabScreen() {
                 <Ionicons name="checkmark" size={13} color={COLORS.success} />
                 <Text style={styles.claimedPillText}>Claimed</Text>
               </View>
-            ) : (
+            ) : storyReadDone ? (
               <TouchableOpacity
                 style={styles.claimButton}
                 activeOpacity={0.8}
@@ -319,6 +393,15 @@ export default function QuestTabScreen() {
                 ) : (
                   <Text style={styles.claimButtonText}>Claim</Text>
                 )}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={styles.actionButton}
+                activeOpacity={0.8}
+                onPress={() => router.push('/difficulty/1' as any)}
+              >
+                <Text style={styles.actionButtonText}>Read</Text>
+                <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />
               </TouchableOpacity>
             )}
           </View>
@@ -395,22 +478,42 @@ export default function QuestTabScreen() {
                   <Text style={styles.rewardTagText}>+10</Text>
                 </View>
               </View>
-              <Text style={styles.missionDesc}>Review vocabulary flashcards</Text>
+              <Text style={styles.missionDesc}>Review vocabulary flashcards (5 cards)</Text>
               <View style={styles.missionProgressRow}>
                 <View style={styles.missionProgressBarBg}>
-                  <View style={[styles.missionProgressBarFill, { width: '40%', backgroundColor: COLORS.aslTeal }]} />
+                  <View style={[styles.missionProgressBarFill, { width: `${Math.min((flashcardsDoneCount / 5) * 100, 100)}%`, backgroundColor: COLORS.aslTeal }]} />
                 </View>
-                <Text style={styles.missionProgressText}>2/5</Text>
+                <Text style={styles.missionProgressText}>{Math.min(flashcardsDoneCount, 5)}/5</Text>
               </View>
             </View>
-            <TouchableOpacity
-              style={styles.actionButton}
-              activeOpacity={0.8}
-              onPress={() => router.push('/flashcards' as any)}
-            >
-              <Text style={styles.actionButtonText}>Review</Text>
-              <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />
-            </TouchableOpacity>
+            {claimedMissions['flashcards'] ? (
+              <View style={styles.claimedPill}>
+                <Ionicons name="checkmark" size={13} color={COLORS.success} />
+                <Text style={styles.claimedPillText}>Claimed</Text>
+              </View>
+            ) : flashcardsDoneCount >= 5 ? (
+              <TouchableOpacity
+                style={styles.claimButton}
+                activeOpacity={0.8}
+                disabled={claimingMission === 'flashcards'}
+                onPress={() => handleClaimMission('flashcards', 10)}
+              >
+                {claimingMission === 'flashcards' ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.claimButtonText}>Claim</Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={styles.actionButton}
+                activeOpacity={0.8}
+                onPress={() => router.push('/flashcards' as any)}
+              >
+                <Text style={styles.actionButtonText}>Review</Text>
+                <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />
+              </TouchableOpacity>
+            )}
           </View>
 
           {/* 4. Daily Quiz Challenge Hub Preview */}
@@ -481,58 +584,6 @@ export default function QuestTabScreen() {
               </View>
             </View>
           </TouchableOpacity>
-
-          {/* 5. Milestone Trophy Showcase */}
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionTitle}>Trophy Showcase</Text>
-            <TouchableOpacity onPress={() => router.push('/badges' as any)}>
-              <Text style={styles.sectionLink}>
-                {unlockedBadgesCount} / {badges.length} Unlocked →
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.trophyGrid}>
-            {badges.slice(0, 4).map(badge => (
-              <View
-                key={badge.id}
-                style={[
-                  styles.trophyCard,
-                  badge.unlocked ? styles.trophyCardUnlocked : styles.trophyCardLocked
-                ]}
-              >
-                <View style={[
-                  styles.trophyIconSquircle,
-                  badge.unlocked
-                    ? { backgroundColor: `${badge.color}15`, borderColor: badge.color }
-                    : { backgroundColor: '#F1F5F9', borderColor: '#E2E8F0' }
-                ]}>
-                  <Ionicons
-                    name={badge.icon as any}
-                    size={24}
-                    color={badge.unlocked ? badge.color : '#94A3B8'}
-                  />
-                </View>
-                <Text style={[styles.trophyTitle, !badge.unlocked && { color: '#94A3B8' }]} numberOfLines={1}>
-                  {badge.title}
-                </Text>
-                <Text style={styles.trophyDesc} numberOfLines={2}>
-                  {badge.description}
-                </Text>
-                {badge.unlocked ? (
-                  <View style={styles.badgeUnlockedBadge}>
-                    <Ionicons name="checkmark-circle" size={11} color={COLORS.success} />
-                    <Text style={styles.badgeUnlockedText}>Earned</Text>
-                  </View>
-                ) : (
-                  <View style={styles.badgeLockedBadge}>
-                    <Ionicons name="lock-closed" size={10} color="#94A3B8" />
-                    <Text style={styles.badgeLockedText}>Locked</Text>
-                  </View>
-                )}
-              </View>
-            ))}
-          </View>
 
           <View style={{ height: 28 }} />
         </ScrollView>
@@ -622,7 +673,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 16,
     paddingTop: 14,
-    paddingBottom: 32,
+    paddingBottom: 80,
   },
   // Streak Banner
   streakBanner: {
@@ -922,82 +973,5 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     color: '#B45309',
-  },
-  // Trophy Grid
-  trophyGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  trophyCard: {
-    width: '48%',
-    backgroundColor: COLORS.card,
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 12,
-    alignItems: 'center',
-    elevation: 1,
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 4,
-  },
-  trophyCardUnlocked: {
-    borderColor: COLORS.primaryBorder,
-  },
-  trophyCardLocked: {
-    borderColor: COLORS.border,
-    opacity: 0.75,
-  },
-  trophyIconSquircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  trophyTitle: {
-    fontSize: 13.5,
-    fontWeight: '700',
-    color: COLORS.textPrimary,
-    marginBottom: 2,
-    textAlign: 'center',
-  },
-  trophyDesc: {
-    fontSize: 11,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
-    lineHeight: 14,
-    marginBottom: 8,
-  },
-  badgeUnlockedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.successBg,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    gap: 3,
-  },
-  badgeUnlockedText: {
-    fontSize: 10.5,
-    fontWeight: '700',
-    color: COLORS.success,
-  },
-  badgeLockedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    gap: 3,
-  },
-  badgeLockedText: {
-    fontSize: 10.5,
-    fontWeight: '600',
-    color: '#94A3B8',
   },
 });

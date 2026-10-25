@@ -5,6 +5,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { SubjectsProvider } from "../context/SubjectsContext";
 import { AuthProvider, useAuth } from "../context/AuthContext";
+import { AccessibilityProvider } from "../context/AccessibilityContext";
 
 function RootLayoutContent() {
   const { user, isLoading } = useAuth();
@@ -60,11 +61,13 @@ function RootLayoutContent() {
 export default function RootLayout() {
   return (
     <SafeAreaProvider>
-      <StatusBar style="dark" backgroundColor="transparent" translucent />
+      <StatusBar style="dark" />
       <AuthProvider>
-        <SubjectsProvider>
-          <RootLayoutContent />
-        </SubjectsProvider>
+        <AccessibilityProvider>
+          <SubjectsProvider>
+            <RootLayoutContent />
+          </SubjectsProvider>
+        </AccessibilityProvider>
       </AuthProvider>
     </SafeAreaProvider>
   );

@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { API_URL } from '../context/config';
+import { API_URL, resolveMediaUrl } from '../context/config';
 import { useAuth } from '../context/AuthContext';
 
 interface KnowledgeComponent {
@@ -42,7 +42,23 @@ interface UserRecord {
 }
 
 export default function AdminScreen() {
-  const { user, logout } = useAuth();
+  const { user, logout, isLoading: authLoading } = useAuth();
+  const [authorized, setAuthorized] = useState(false);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user) {
+      router.replace('/');
+      return;
+    }
+    if (user.role !== 'admin') {
+      showAlert('Access Denied', 'Admin Workspace is restricted to system administrators.');
+      router.replace('/');
+      return;
+    }
+    setAuthorized(true);
+  }, [user, authLoading]);
+
   const { width: windowWidth } = useWindowDimensions();
   const isDesktop = windowWidth >= 1000;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -136,6 +152,19 @@ export default function AdminScreen() {
     }
   };
 
+  const confirmAction = (title: string, message: string, onConfirm: () => void) => {
+    if (Platform.OS === 'web') {
+      if (window.confirm(`${title}\n\n${message}`)) {
+        onConfirm();
+      }
+    } else {
+      Alert.alert(title, message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: onConfirm },
+      ]);
+    }
+  };
+
   const handleLogout = async () => {
     await logout();
     router.replace('/');
@@ -177,7 +206,10 @@ export default function AdminScreen() {
   const fetchDiagnostics = useCallback(async () => {
     setLoadingDiagnostics(true);
     try {
-      const res = await fetch(`${API_URL}/admin/analytics`);
+      const res = await fetch(`${API_URL}/admin/analytics?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' }
+      });
       if (res.ok) {
         const data = await res.json();
         setAnalyticsData(data);
@@ -227,6 +259,21 @@ export default function AdminScreen() {
       return;
     }
 
+    const priorNum = parseFloat(kcPrior);
+    const learnsNum = parseFloat(kcLearns);
+    const guessesNum = parseFloat(kcGuesses);
+    const slipsNum = parseFloat(kcSlips);
+
+    if (
+      isNaN(priorNum) || priorNum < 0.01 || priorNum > 0.95 ||
+      isNaN(learnsNum) || learnsNum < 0.01 || learnsNum > 0.95 ||
+      isNaN(guessesNum) || guessesNum < 0.01 || guessesNum > 0.95 ||
+      isNaN(slipsNum) || slipsNum < 0.01 || slipsNum > 0.95
+    ) {
+      showAlert('Invalid Parameters', 'pyBKT parameters (Prior, Learn, Guess, Slip) must each be between 0.01 and 0.95.');
+      return;
+    }
+
     setSubmittingKC(true);
     try {
       const res = await fetch(`${API_URL}/admin/kc/create`, {
@@ -236,14 +283,17 @@ export default function AdminScreen() {
           topic_id: selectedTopicId,
           name: kcName.trim().toLowerCase().replace(/\s+/g, '_'),
           display_name: kcDisplayName.trim(),
-          prior: parseFloat(kcPrior) || 0.1,
-          learns: parseFloat(kcLearns) || 0.2,
-          guesses: parseFloat(kcGuesses) || 0.25,
-          slips: parseFloat(kcSlips) || 0.1,
+          prior: priorNum,
+          learns: learnsNum,
+          guesses: guessesNum,
+          slips: slipsNum,
         }),
       });
 
-      if (!res.ok) throw new Error('Failed to create Knowledge Component');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to create Knowledge Component');
+      }
 
       showAlert('Success', `Knowledge Component "${kcDisplayName}" registered successfully.`);
       setKcName('');
@@ -263,20 +313,17 @@ export default function AdminScreen() {
 
   // Delete Knowledge Component
   const handleDeleteKC = async (name: string) => {
-    const confirm = Platform.OS === 'web'
-      ? window.confirm(`Delete Knowledge Component "${name}"?`)
-      : true;
-    if (!confirm) return;
-
-    try {
-      const res = await fetch(`${API_URL}/admin/kc/${name}`, { method: 'DELETE' });
-      if (res.ok) {
-        showAlert('Deleted', `Knowledge Component "${name}" was removed.`);
-        fetchKcs(selectedTopicId);
+    confirmAction('Delete Knowledge Component', `Delete Knowledge Component "${name}"?`, async () => {
+      try {
+        const res = await fetch(`${API_URL}/admin/kc/${name}`, { method: 'DELETE' });
+        if (res.ok) {
+          showAlert('Deleted', `Knowledge Component "${name}" was removed.`);
+          fetchKcs(selectedTopicId);
+        }
+      } catch {
+        showAlert('Error', 'Could not delete Knowledge Component.');
       }
-    } catch {
-      showAlert('Error', 'Could not delete Knowledge Component.');
-    }
+    });
   };
 
   // Run pyBKT Model Calibration
@@ -311,6 +358,10 @@ export default function AdminScreen() {
   const handleCreateTeacher = async () => {
     if (!teacherName.trim() || !teacherUsername.trim() || !teacherPassword.trim()) {
       showAlert('Required Fields', 'Please enter Name, Username, and Password for the teacher.');
+      return;
+    }
+    if (teacherPassword.trim().length < 6) {
+      showAlert('Password Too Short', 'Teacher password must be at least 6 characters.');
       return;
     }
 
@@ -366,6 +417,10 @@ export default function AdminScreen() {
   const handleResetPassword = async () => {
     if (!selectedUser || !newResetPassword.trim()) {
       showAlert('Required', 'Please enter a new password.');
+      return;
+    }
+    if (newResetPassword.trim().length < 6) {
+      showAlert('Password Too Short', 'Password must be at least 6 characters.');
       return;
     }
     setResettingPassword(true);
@@ -426,6 +481,17 @@ export default function AdminScreen() {
       setDeletingUser(false);
     }
   };
+
+  if (authLoading || !authorized) {
+    return (
+      <SafeAreaView style={[styles.safeArea, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#4F46E5" />
+        <Text style={{ marginTop: 12, fontSize: 14, color: '#64748B', fontWeight: '500' }}>
+          Verifying administrator authorization...
+        </Text>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -1424,7 +1490,7 @@ export default function AdminScreen() {
                       >
                         <View style={[styles.userAvatarBox, (styles as any)[`userAvatar_${u.role}`]]}>
                           {u.avatar_url ? (
-                            <Image source={{ uri: u.avatar_url }} style={{ width: '100%', height: '100%', borderRadius: 9 }} />
+                            <Image source={{ uri: resolveMediaUrl(u.avatar_url) }} style={{ width: '100%', height: '100%', borderRadius: 9 }} />
                           ) : (
                             <Ionicons
                               name={u.role === 'admin' ? 'shield-checkmark-outline' : u.role === 'teacher' ? 'school-outline' : 'person-outline'}
@@ -1908,7 +1974,7 @@ export default function AdminScreen() {
               <ScrollView showsVerticalScrollIndicator={false}>
                 {selectedUser.avatar_url && (
                   <View style={{ alignItems: 'center', marginBottom: 16 }}>
-                    <Image source={{ uri: selectedUser.avatar_url }} style={{ width: 64, height: 64, borderRadius: 32, borderWidth: 2, borderColor: '#C7D2FE' }} />
+                    <Image source={{ uri: resolveMediaUrl(selectedUser.avatar_url) }} style={{ width: 64, height: 64, borderRadius: 32, borderWidth: 2, borderColor: '#C7D2FE' }} />
                   </View>
                 )}
                 {/* Basic Details */}
@@ -1953,39 +2019,19 @@ export default function AdminScreen() {
                   </View>
                 </View>
 
-                {/* Password Section */}
+                {/* Security Status */}
                 <View style={styles.modalSection}>
-                  <Text style={styles.modalSectionTitle}>Account Password</Text>
+                  <Text style={styles.modalSectionTitle}>Security Status</Text>
                   <View style={styles.passwordDisplayBox}>
                     <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                      <Ionicons name="key-outline" size={18} color="#7C3AED" />
-                      <Text
-                        style={[
-                          styles.passwordDisplayText,
-                          !showPassword && styles.passwordDisplayTextMasked,
-                        ]}
-                        selectable={true}
-                      >
-                        {showPassword
-                          ? (selectedUser.password || 'No plain password recorded')
-                          : '••••••••••••'}
+                      <Ionicons name="shield-checkmark" size={18} color="#10B981" />
+                      <Text style={styles.passwordDisplayText}>
+                        Hashed & Encrypted (SHA-256)
                       </Text>
                     </View>
-                    <TouchableOpacity
-                      style={styles.eyeBtn}
-                      onPress={() => setShowPassword(!showPassword)}
-                    >
-                      <Ionicons
-                        name={showPassword ? 'eye-off-outline' : 'eye-outline'}
-                        size={20}
-                        color="#64748B"
-                      />
-                    </TouchableOpacity>
                   </View>
                   <Text style={styles.passwordHint}>
-                    {showPassword
-                      ? 'Password is visible to Administrator. You can copy or inspect it.'
-                      : 'Tap the eye icon to reveal the plain password.'}
+                    Passwords are secure and cannot be viewed in plaintext. Use the form below to reset.
                   </Text>
                 </View>
 
