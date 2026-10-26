@@ -25,6 +25,7 @@ import {
   getEliminationScaffold,
   getWrongAnswerScaffold,
 } from "../../context/kcScaffolding";
+import { translateToAslGloss } from "../../context/aslTranslator";
 
 const { width } = Dimensions.get('window');
 
@@ -312,11 +313,11 @@ export default function QuizScreen() {
       if (result) {
         setAslResult(result);
       } else {
-        // Model returned empty — give a plain English simplified version as fallback
-        setAslResult(`[ASL model could not process this text. Plain version]: "${textToTranslate}"`);
+        setAslResult(translateToAslGloss(textToTranslate));
       }
     } catch {
-      setAslResult('Could not connect to the translation server. Make sure the server is running.');
+      // Local client-side ASL Gloss fallback if server is unreachable
+      setAslResult(translateToAslGloss(textToTranslate));
     } finally {
       setAslLoading(false);
     }
@@ -498,13 +499,13 @@ export default function QuizScreen() {
       const mapped = sessionData.questions.map((q: any) => ({
         id: q.id,
         question: q.question_text,
-        deafQuestion: (q.question_text || '').toUpperCase(),
+        deafQuestion: translateToAslGloss(q.question_text),
         question_type: q.question_type || 'descriptive',
         image_url: q.image_url,
         options: (q.options || []).map((opt: string, idx: number) => ({
           id: String.fromCharCode(65 + idx),
           text: opt,
-          deafText: (opt || '').toUpperCase(),
+          deafText: translateToAslGloss(opt),
         })),
         correctOptionId: String.fromCharCode(65 + q.correct_option_index),
         matching_pairs: (q.matching_pairs || []).map((p: any) => ({
@@ -548,13 +549,13 @@ export default function QuizScreen() {
         const mapped = questionsPool.map((q: any) => ({
           id: q.id,
           question: q.question_text,
-          deafQuestion: (q.question_text || '').toUpperCase(),
+          deafQuestion: translateToAslGloss(q.question_text),
           question_type: q.question_type || 'descriptive',
           image_url: q.image_url,
           options: (q.options || []).map((opt: string, idx: number) => ({
             id: String.fromCharCode(65 + idx),
             text: opt,
-            deafText: (opt || '').toUpperCase(),
+            deafText: translateToAslGloss(opt),
           })),
           correctOptionId: String.fromCharCode(65 + (q.correct_option_index ?? 0)),
           matching_pairs: (q.matching_pairs || []).map((p: any) => ({

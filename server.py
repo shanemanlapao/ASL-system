@@ -975,9 +975,9 @@ def _load_mbart_model():
         model_loading = False
 
 def _delayed_load_mbart():
-    # Only load in background if explicitly enabled via environment variable
+    # Load in background shortly after startup if enabled
     if os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
-        time.sleep(30)
+        time.sleep(2)
         _load_mbart_model()
 
 if os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
@@ -1033,6 +1033,187 @@ def tag_for_subject(sentence: str) -> str:
         return ", aren't I?"
     return ", isn't it?"
 
+IRREGULAR_ASL_VERBS = {
+    # Past -> (Base, is_past)
+    "placed": ("PLACE", True),
+    "lost": ("LOSE", True),
+    "found": ("FIND", True),
+    "went": ("GO", True),
+    "ran": ("RUN", True),
+    "saw": ("SEE", True),
+    "took": ("TAKE", True),
+    "gave": ("GIVE", True),
+    "cried": ("CRY", True),
+    "walked": ("WALK", True),
+    "talked": ("TALK", True),
+    "spoke": ("SPEAK", True),
+    "wrote": ("WRITE", True),
+    "read": ("READ", False),
+    "asked": ("ASK", True),
+    "told": ("TELL", True),
+    "answered": ("ANSWER", True),
+    "solved": ("SOLVE", True),
+    "moved": ("MOVE", True),
+    "shifted": ("SHIFT", True),
+    "reflected": ("REFLECT", True),
+    "translated": ("TRANSLATE", True),
+    "flipped": ("FLIP", True),
+    "turned": ("TURN", True),
+    "joined": ("JOIN", True),
+    "started": ("START", True),
+    "began": ("START", True),
+    "finished": ("FINISH", True),
+    "learned": ("LEARN", True),
+    "taught": ("TEACH", True),
+    "fought": ("FIGHT", True),
+    "created": ("CREATE", True),
+    "founded": ("FOUND", True),
+    "decided": ("DECIDE", True),
+    "wanted": ("WANT", True),
+    "needed": ("NEED", True),
+    "opened": ("OPEN", True),
+    "closed": ("CLOSE", True),
+    "checked": ("CHECK", True),
+    "clicked": ("CLICK", True),
+    "muted": ("MUTE", True),
+    "unmuted": ("UNMUTE", True),
+    "shared": ("SHARE", True),
+    "noticed": ("NOTICE", True),
+    "remembered": ("REMEMBER", True),
+    "forgot": ("FORGET", True),
+    "became": ("BECOME", True),
+    "brought": ("BRING", True),
+    "bought": ("BUY", True),
+    "caught": ("CATCH", True),
+    "heard": ("HEAR", True),
+    "knew": ("KNOW", True),
+    "felt": ("FEEL", True),
+    "left": ("LEAVE", True),
+    "met": ("MEET", True),
+    "paid": ("PAY", True),
+    "sat": ("SIT", True),
+    "stood": ("STAND", True),
+    "spent": ("SPEND", True),
+    "understood": ("UNDERSTAND", True),
+    "won": ("WIN", True),
+    "baked": ("BAKE", True),
+    "bakes": ("BAKE", False),
+    "baking": ("BAKE", False),
+    "liked": ("LIKE", True),
+    "loved": ("LOVE", True),
+    "placed": ("PLACE", True),
+    "saved": ("SAVE", True),
+    "smiled": ("SMILE", True),
+    "lived": ("LIVE", True),
+    "cared": ("CARE", True),
+    # Participles / continuous -> (Base, False)
+    "walking": ("WALK", False),
+    "running": ("RUN", False),
+    "eating": ("EAT", False),
+    "reading": ("READ", False),
+    "writing": ("WRITE", False),
+    "moving": ("MOVE", False),
+    "shifting": ("SHIFT", False),
+    "reflecting": ("REFLECT", False),
+    "translating": ("TRANSLATE", False),
+    "studying": ("STUDY", False),
+    "learning": ("LEARN", False),
+    "talking": ("TALK", False),
+    "looking": ("LOOK", False),
+    "crying": ("CRY", False),
+    "playing": ("PLAY", False),
+    "helping": ("HELP", False),
+    "meeting": ("MEET", False),
+    # 3rd person singular -> (Base, False)
+    "moves": ("MOVE", False),
+    "shifts": ("SHIFT", False),
+    "flips": ("FLIP", False),
+    "reflects": ("REFLECT", False),
+    "translates": ("TRANSLATE", False),
+    "wants": ("WANT", False),
+    "needs": ("NEED", False),
+    "helps": ("HELP", False),
+    "finds": ("FIND", False),
+    "loses": ("LOSE", False),
+    "takes": ("TAKE", False),
+    "gives": ("GIVE", False),
+    "asks": ("ASK", False),
+    "says": ("SAY", False),
+    "speaks": ("SPEAK", False),
+    "writes": ("WRITE", False),
+    "reads": ("READ", False),
+    "understands": ("UNDERSTAND", False),
+}
+
+ASL_PRONOUNS_MAP = {
+    "i": "ME",
+    "me": "ME",
+    "my": "MY",
+    "mine": "MY",
+    "you": "YOU",
+    "your": "YOUR",
+    "yours": "YOUR",
+    "he": "HE",
+    "him": "HE",
+    "his": "POSS-HIS",
+    "she": "SHE",
+    "her": "POSS-HER",
+    "hers": "POSS-HER",
+    "they": "THEY",
+    "them": "THEY",
+    "their": "POSS-THEIR",
+    "theirs": "POSS-THEIR",
+    "we": "WE",
+    "us": "WE",
+    "our": "OUR",
+    "ours": "OUR",
+    "it": "IT",
+    "its": "POSS-ITS",
+}
+
+ASL_TIME_WORDS = {
+    "yesterday", "tomorrow", "today", "now", "past", "future", 
+    "morning", "night", "afternoon", "evening", "beginning", "before", 
+    "earlier", "later", "first", "finally", "then", "soon", "always", "never"
+}
+
+ASL_WH_WORDS = {"who", "what", "where", "when", "why", "how", "which"}
+
+ASL_NON_STEM_ING = {
+    "during", "morning", "evening", "meeting", "building", "clothing", 
+    "ceiling", "ring", "string", "king", "wing", "spring", "thing", 
+    "something", "anything", "nothing", "everything", "setting", "beginning"
+}
+
+ASL_NON_STEM_ED = {
+    "bed", "red", "fed", "sled", "shed", "seed", "feed", "need", "speed"
+}
+
+ASL_PHRASAL_RULES = [
+    (r"\bdo\s+not\s+know\b|\bdon't\s+know\b", "DON'T-KNOW"),
+    (r"\bdo\s+not\s+understand\b|\bdon't\s+understand\b", "DON'T-UNDERSTAND"),
+    (r"\bcannot\b|\bcan't\b", "CAN'T"),
+    (r"\bdid\s+not\b|\bdidn't\b", "NOT"),
+    (r"\bdoes\s+not\b|\bdoesn't\b", "NOT"),
+    (r"\bdo\s+not\b|\bdon't\b", "NOT"),
+    (r"\bwill\s+not\b|\bwon't\b", "WON'T"),
+    (r"\bthank\s+you\b|\bthanks\b", "THANK-YOU"),
+    (r"\byou\s+are\s+welcome\b|\byou're\s+welcome\b", "WELCOME"),
+    (r"\bvideo\s+conferencing\b|\bvideo\s+conference\b|\bonline\s+meeting\b", "VIDEO-MEET"),
+    (r"\bsign\s+language\b", "SIGN-LANGUAGE"),
+    (r"\bstory\s+grammar\b", "STORY-GRAMMAR"),
+    (r"\bcoordinate\s+grid\b|\bcartesian\s+plane\b", "GRID"),
+    (r"\blook\s+for\b|\blooked\s+for\b|\blooking\s+for\b", "SEARCH"),
+    (r"\blook\s+at\b|\blooked\s+at\b|\blooking\s+at\b", "LOOK-AT"),
+    (r"\bpick\s+up\b|\bpicked\s+up\b|\bpicking\s+up\b", "PICK-UP"),
+    (r"\bplaced\s+on\b|\bput\s+on\b", "PLACE-ON"),
+    (r"\bturn\s+on\b|\bturned\s+on\b", "TURN-ON"),
+    (r"\bturn\s+off\b|\bturned\s+off\b", "TURN-OFF"),
+    (r"\bwake\s+up\b|\bwoke\s+up\b", "WAKE-UP"),
+    (r"\bsit\s+down\b|\bsat\s+down\b", "SIT-DOWN"),
+    (r"\bstand\s+up\b|\bstood\s+up\b", "STAND-UP"),
+]
+
 def _single_sentence_asl_gloss(sentence: str, orig_punct: str) -> str:
     clean_text = sentence.strip()
     if not clean_text:
@@ -1042,104 +1223,115 @@ def _single_sentence_asl_gloss(sentence: str, orig_punct: str) -> str:
     has_tag = tag is not None
     is_question = orig_punct == "?" or clean_text.endswith("?") or has_tag
 
-    phrase_map = {
-        "thank you": "THANK-YOU",
-        "thanks": "THANK-YOU",
-        "you are welcome": "WELCOME",
-        "good morning": "MORNING GOOD",
-        "good afternoon": "AFTERNOON GOOD",
-        "good night": "NIGHT GOOD",
-        "how are you": "HOW YOU?",
-        "hello": "HELLO",
-        "hi": "HI",
-        "hey": "HEY",
-        "hello how are you": "HELLO, HOW YOU?",
-        "hi how are you": "HI, HOW YOU?",
-        "hey how are you": "HEY, HOW YOU?",
-        "hello what is your name": "HELLO, YOUR NAME WHAT?",
-        "hi what is your name": "HI, YOUR NAME WHAT?",
-        "hello who are you": "HELLO, YOU WHO?",
-        "hi who are you": "HI, YOU WHO?",
-        "hello nice to meet you": "HELLO, NICE MEET YOU",
-        "hi nice to meet you": "HI, NICE MEET YOU",
-        "my name is": "MY NAME",
-        "what is your name": "YOUR NAME WHAT?",
-        "who are you": "YOU WHO?",
-        "where are you": "YOU WHERE?",
-        "i don't know": "ME DON'T-KNOW",
-        "i do not know": "ME DON'T-KNOW",
-        "see you later": "SEE LATER",
-    }
+    # 1. Multi-word phrase substitutions
+    working_text = base_text
+    for pattern, repl in ASL_PHRASAL_RULES:
+        working_text = re.sub(pattern, repl, working_text, flags=re.IGNORECASE)
 
-    text_no_punct = re.sub(r'[?!.,;:]', '', base_text).lower().strip()
-    if not has_tag and text_no_punct in phrase_map:
-        res = phrase_map[text_no_punct]
-        if orig_punct in ("!", "?") and not res.endswith(orig_punct):
-            if not res.endswith("?"):
-                res += orig_punct
-        return res
-
-    words = text_no_punct.split()
-    if not words:
+    raw_tokens = re.sub(r'[?!.,;:]', '', working_text).split()
+    if not raw_tokens:
         return ""
 
-    leading_greeting = None
-    if len(words) > 1 and words[0] in ("hello", "hi", "hey"):
-        leading_greeting = words[0].upper()
-        words = words[1:]
+    time_tokens = []
+    wh_tokens = []
+    content_tokens = []
+    is_past_action = False
 
-    time_words = {"yesterday", "tomorrow", "today", "now", "past", "future", "morning", "night", "afternoon", "beginning"}
-    found_time = []
-    filtered_words = []
-
+    # Extract Year expressions (e.g. "in 1892" -> "YEAR 1892")
     i = 0
-    while i < len(words):
-        w = words[i]
-        if w in ("at", "in") and i + 2 < len(words) and words[i+1] == "the" and words[i+2] in time_words:
-            found_time.append(words[i+2].upper())
-            i += 3
-        elif w in time_words:
-            found_time.append(w.upper())
-            i += 1
-        else:
-            filtered_words.append(w)
-            i += 1
-
-    wh_words = {"who", "what", "where", "when", "why", "how", "which"}
-    found_wh = []
-    content_words = []
-
-    for w in filtered_words:
-        if w in wh_words:
-            found_wh.append(w.upper())
-        elif w in {"is", "am", "are", "was", "were", "be", "been", "being", "will", "would", "shall"}:
+    filtered_tokens = []
+    while i < len(raw_tokens):
+        tok = raw_tokens[i]
+        tok_lower = tok.lower()
+        if tok_lower == "in" and i + 1 < len(raw_tokens) and re.match(r'^\d{4}$', raw_tokens[i+1]):
+            time_tokens.append(f"YEAR {raw_tokens[i+1]}")
+            is_past_action = True
+            i += 2
             continue
-        elif w in {"a", "an", "the"}:
-            continue
-        elif w in {"do", "does", "did"} and (is_question or found_wh):
-            continue
-        else:
-            if w in {"i", "me"}:
-                content_words.append("ME")
-            elif w in {"my", "mine"}:
-                content_words.append("MY")
-            elif w in {"your", "yours"}:
-                content_words.append("YOUR")
-            else:
-                content_words.append(w.upper())
+        filtered_tokens.append(tok)
+        i += 1
 
+    for tok in filtered_tokens:
+        if '-' in tok and tok.isupper():
+            content_tokens.append(tok)
+            continue
+
+        tok_lower = tok.lower()
+
+        # Omit articles and copula forms
+        if tok_lower in {"a", "an", "the"}:
+            continue
+        if tok_lower in {"is", "am", "are", "was", "were", "be", "been", "being"}:
+            if tok_lower in {"was", "were"}:
+                is_past_action = True
+            continue
+        if tok_lower in {"do", "does", "did"}:
+            if tok_lower == "did":
+                is_past_action = True
+            continue
+        if tok_lower == "to" and len(content_tokens) > 0:
+            continue
+        if tok_lower in {"of", "by"}:
+            continue
+
+        # Check Wh-interrogatives
+        if tok_lower in ASL_WH_WORDS:
+            wh_tokens.append(tok.upper())
+            continue
+
+        # Check Time words
+        if tok_lower in ASL_TIME_WORDS:
+            time_tokens.append(tok.upper())
+            continue
+
+        # Check Pronouns
+        if tok_lower in ASL_PRONOUNS_MAP:
+            content_tokens.append(ASL_PRONOUNS_MAP[tok_lower])
+            continue
+
+        # Check Verbs & Lemmatization
+        if tok_lower in IRREGULAR_ASL_VERBS:
+            base, past = IRREGULAR_ASL_VERBS[tok_lower]
+            if past:
+                is_past_action = True
+            content_tokens.append(base)
+            continue
+        elif tok_lower.endswith("ed") and len(tok_lower) > 4 and tok_lower not in ASL_NON_STEM_ED:
+            is_past_action = True
+            base = tok_lower[:-2]
+            if base.endswith("i"):
+                base = base[:-1] + "y"
+            elif base.endswith(("bb", "dd", "gg", "mm", "nn", "pp", "rr", "tt")):
+                base = base[:-1]
+            content_tokens.append(base.upper())
+            continue
+        elif tok_lower.endswith("ing") and len(tok_lower) > 5 and tok_lower not in ASL_NON_STEM_ING:
+            base = tok_lower[:-3]
+            if base.endswith(("bb", "dd", "gg", "mm", "nn", "pp", "rr", "tt")):
+                base = base[:-1]
+            content_tokens.append(base.upper())
+            continue
+
+        content_tokens.append(tok.upper())
+
+    # Build Gloss: [TIME] [SUBJECT/OBJECT/VERB] [FINISH] [WH?]
     ordered = []
-    if found_time:
-        ordered.extend(found_time)
-    if content_words:
-        ordered.extend(content_words)
-    if found_wh:
-        ordered.extend(found_wh)
+    if time_tokens:
+        ordered.extend(time_tokens)
+    if content_tokens:
+        ordered.extend(content_tokens)
+
+    # Past aspect marker
+    if is_past_action and not wh_tokens and "FINISH" not in ordered:
+        ordered.append("FINISH")
+
+    if wh_tokens:
+        ordered.extend(wh_tokens)
 
     result_str = " ".join(ordered)
     if has_tag:
         result_str = f"{result_str}, RIGHT?" if result_str else "RIGHT?"
-    elif is_question or found_wh:
+    elif is_question or wh_tokens:
         if not result_str.endswith("?"):
             result_str += "?"
     elif orig_punct == "!":
@@ -1149,22 +1341,18 @@ def _single_sentence_asl_gloss(sentence: str, orig_punct: str) -> str:
         if not result_str.endswith((".", "!", "?")):
             result_str += "."
 
-    if leading_greeting:
-        result_str = f"{leading_greeting}, {result_str}" if result_str else leading_greeting
-
     return result_str if result_str else clean_text.upper()
 
 def rule_based_asl_gloss(text: str) -> str:
     """
-    Linguistic ASL Gloss Grammar Engine:
+    Linguistic ASL Gloss & Deaf English Grammar Engine:
     - Multi-sentence splitting with preserved punctuation
-    - Confirmation tag questions (e.g. 'isn't it?' -> 'RIGHT?')
-    - Time-First positioning (BEGINNING, YESTERDAY, TOMORROW, NOW)
-    - Interrogatives (WH-words) moved to sentence end ('Who are you?' -> 'YOU WHO?')
-    - Strips copulas (is, am, are, was, were, be, been)
-    - Strips articles (a, an, the)
-    - Strips auxiliary do/does/did in questions
-    - Pronoun and idiom normalization
+    - Time-First positioning (YEAR 1892, YESTERDAY, NOW)
+    - Interrogatives (WH-words) positioned at sentence end
+    - Lemmatization of past and continuous verbs to base signs
+    - Aspect marker 'FINISH' appended to completed past events
+    - Strips non-signing copulas (is, am, are, was, were) and articles (a, an, the)
+    - Pronoun and possessive glossing (POSS-HIS, POSS-HER, POSS-THEIR)
     """
     clean_text = text.strip()
     if not clean_text:
@@ -1568,6 +1756,7 @@ class LoginRequest(BaseModel):
 class TranslationRequest(BaseModel):
     text: str
     direction: str  # "en_to_asl" or "asl_to_en"
+    force_engine: Optional[str] = None  # "neural", "rule", or None (auto)
 
 class SlideInput(BaseModel):
     description_text: str
@@ -4327,53 +4516,195 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── Translation endpoint ───────────────────────────────────────────────────────
+# ── Translation endpoint ────────────────────────────────══════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/translate/status")
+def get_translation_status():
+    return {
+        "neural_enabled_env": os.getenv("ENABLE_NEURAL_MBART", "0") == "1",
+        "neural_model_loaded": (model is not None and tokenizer is not None),
+        "model_loading": model_loading,
+        "model_repo": MODEL_REPO,
+        "local_model_exists": os.path.exists(LOCAL_MODEL_PATH),
+        "cached_memory_entries": len(_TRANSLATION_MEMORY_CACHE),
+    }
+
+@app.post("/translate/mbart/load")
+def trigger_load_mbart():
+    global model, tokenizer, model_loading
+    if model is not None and tokenizer is not None:
+        return {"status": "already_loaded", "message": "mBART-50 LoRA is already loaded and ready."}
+    if model_loading:
+        return {"status": "loading", "message": "mBART-50 LoRA is currently loading in the background."}
+    threading.Thread(target=_load_mbart_model, daemon=True).start()
+    return {"status": "started", "message": "Triggered background loading of mBART-50 LoRA."}
+
+class CompareRequest(BaseModel):
+    text: str
+    direction: str = "en_to_asl"
+
+@app.post("/translate/test-compare")
+def test_compare_translation(req: CompareRequest):
+    req_text = (req.text or "").strip()
+    if not req_text:
+        return {"error": "Empty text"}
+    
+    # 1. Linguistic Rule Engine
+    t_rule_0 = time.time()
+    rule_res = rule_based_asl_gloss(req_text) if req.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
+    rule_ms = round((time.time() - t_rule_0) * 1000, 2)
+
+    # 2. Neural mBART-50 LoRA Engine
+    neural_res = None
+    neural_ms = 0
+    neural_loaded = (model is not None and tokenizer is not None)
+    if not neural_loaded and not model_loading:
+        _load_mbart_model()
+        neural_loaded = (model is not None and tokenizer is not None)
+
+    if neural_loaded:
+        t_neural_0 = time.time()
+        try:
+            import torch
+            with torch.inference_mode():
+                if req.direction == "en_to_asl":
+                    tokenizer.src_lang = "en_XX"
+                    inputs = tokenizer(req_text, return_tensors="pt", max_length=128, truncation=True)
+                    out = model.generate(
+                        **inputs,
+                        forced_bos_token_id=tokenizer.convert_tokens_to_ids("asl_GL"),
+                        max_new_tokens=64,
+                        num_beams=1
+                    )
+                    neural_res = tokenizer.decode(out[0], skip_special_tokens=True)
+                else:
+                    tokenizer.src_lang = "asl_GL"
+                    inputs = tokenizer(req_text, return_tensors="pt", max_length=128, truncation=True)
+                    out = model.generate(
+                        **inputs,
+                        forced_bos_token_id=tokenizer.convert_tokens_to_ids("en_XX"),
+                        max_new_tokens=64,
+                        num_beams=1
+                    )
+                    neural_res = tokenizer.decode(out[0], skip_special_tokens=True)
+            neural_ms = round((time.time() - t_neural_0) * 1000, 1)
+        except Exception as e:
+            neural_res = f"Error during generation: {e}"
+
+    return {
+        "input": req_text,
+        "direction": req.direction,
+        "linguistic_rule": {
+            "result": rule_res,
+            "latency_ms": rule_ms
+        },
+        "neural_mbart": {
+            "result": neural_res,
+            "latency_ms": neural_ms,
+            "loaded": neural_loaded
+        }
+    }
 
 
 @app.post("/translate")
 def translate_text(request: TranslationRequest):
     req_text = (request.text or "").strip()
     if not req_text:
-        return {"result": "", "direction": request.direction}
+        return {"result": "", "direction": request.direction, "engine": "none"}
 
-    # 1. Check in-memory LRU cache (<0.001s instant response)
-    cache_key = (req_text, request.direction)
-    with _TRANSLATION_LOCK:
-        if cache_key in _TRANSLATION_MEMORY_CACHE:
-            return {"result": _TRANSLATION_MEMORY_CACHE[cache_key], "direction": request.direction, "cached": True}
+    t_start = time.time()
+    force_eng = (request.force_engine or "").lower().strip()
 
-    # 2. Check persistent PostgreSQL translations_cache (<0.02s)
-    try:
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT translated_text FROM translations_cache WHERE source_text = %s AND direction = %s LIMIT 1",
-            (req_text, request.direction)
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row and row.get("translated_text"):
-            cached_result = row["translated_text"]
-            with _TRANSLATION_LOCK:
-                if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
-                    _TRANSLATION_MEMORY_CACHE.clear()
-                _TRANSLATION_MEMORY_CACHE[cache_key] = cached_result
-            return {"result": cached_result, "direction": request.direction, "cached": True}
-    except Exception:
-        pass
+    # If force_engine == "rule", directly run linguistic grammar engine
+    if force_eng == "rule":
+        text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
+        elapsed_ms = round((time.time() - t_start) * 1000, 1)
+        return {
+            "result": text_res,
+            "direction": request.direction,
+            "engine": "linguistic-rule",
+            "latency_ms": elapsed_ms,
+            "neural": False
+        }
 
-    # 3. Fallback to linguistic rule engine if model is still loading
+    # If force_engine == "neural", force neural loading and inference (bypass cache)
+    if force_eng == "neural":
+        if not tokenizer or not model:
+            if not model_loading:
+                _load_mbart_model()
+            if not tokenizer or not model:
+                text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
+                elapsed_ms = round((time.time() - t_start) * 1000, 1)
+                return {
+                    "result": text_res,
+                    "direction": request.direction,
+                    "engine": "linguistic-rule (neural loading)",
+                    "latency_ms": elapsed_ms,
+                    "note": "mBART model is still loading weights into memory. Please retry in 10-20 seconds.",
+                    "neural": False
+                }
+
+    # Standard Cache Lookup (only when not forcing neural)
+    if force_eng != "neural":
+        cache_key = (req_text, request.direction)
+        with _TRANSLATION_LOCK:
+            if cache_key in _TRANSLATION_MEMORY_CACHE:
+                elapsed_ms = round((time.time() - t_start) * 1000, 1)
+                return {
+                    "result": _TRANSLATION_MEMORY_CACHE[cache_key],
+                    "direction": request.direction,
+                    "cached": True,
+                    "engine": "cache",
+                    "latency_ms": elapsed_ms
+                }
+
+        try:
+            conn = get_db()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                "SELECT translated_text FROM translations_cache WHERE source_text = %s AND direction = %s LIMIT 1",
+                (req_text, request.direction)
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row and row.get("translated_text"):
+                cached_result = row["translated_text"]
+                with _TRANSLATION_LOCK:
+                    if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
+                        _TRANSLATION_MEMORY_CACHE.clear()
+                    _TRANSLATION_MEMORY_CACHE[cache_key] = cached_result
+                elapsed_ms = round((time.time() - t_start) * 1000, 1)
+                return {
+                    "result": cached_result,
+                    "direction": request.direction,
+                    "cached": True,
+                    "engine": "cache",
+                    "latency_ms": elapsed_ms
+                }
+        except Exception:
+            pass
+
+    # Fallback to linguistic rule engine if model is not loaded
     if not tokenizer or not model:
         if not model_loading and os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
             threading.Thread(target=_load_mbart_model, daemon=True).start()
         text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
-        return {"result": text_res, "direction": request.direction, "fallback": True}
+        elapsed_ms = round((time.time() - t_start) * 1000, 1)
+        return {
+            "result": text_res,
+            "direction": request.direction,
+            "fallback": True,
+            "engine": "linguistic-rule",
+            "latency_ms": elapsed_ms,
+            "neural": False
+        }
 
-    # 4. Neural generation under torch.inference_mode()
+    # Neural generation under torch.inference_mode()
     import torch
     max_tokens = 32 if len(req_text.split()) <= 15 else 64
+    active_engine = "mbart-50-lora"
 
     try:
         with torch.inference_mode():
@@ -4412,14 +4743,16 @@ def translate_text(request: TranslationRequest):
     except Exception as gen_err:
         print(f"[Translation] Neural generation fallback: {gen_err}")
         result = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
+        active_engine = "linguistic-rule (fallback)"
 
-    # 5. Populate in-memory cache
+    # Populate in-memory cache
+    cache_key = (req_text, request.direction)
     with _TRANSLATION_LOCK:
         if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
             _TRANSLATION_MEMORY_CACHE.clear()
         _TRANSLATION_MEMORY_CACHE[cache_key] = result
 
-    # 6. Asynchronously persist to database cache
+    # Asynchronously persist to database cache
     def _persist_cache_async(s_text, s_dir, t_res):
         try:
             p_conn = get_db()
@@ -4438,7 +4771,14 @@ def translate_text(request: TranslationRequest):
 
     threading.Thread(target=_persist_cache_async, args=(req_text, request.direction, result), daemon=True).start()
 
-    return {"result": result, "direction": request.direction}
+    elapsed_ms = round((time.time() - t_start) * 1000, 1)
+    return {
+        "result": result,
+        "direction": request.direction,
+        "engine": active_engine,
+        "latency_ms": elapsed_ms,
+        "neural": (active_engine == "mbart-50-lora")
+    }
 
 
 @app.get("/health")

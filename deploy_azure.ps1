@@ -11,10 +11,10 @@ $RESOURCE_GROUP = "rg-asl-learning-system"
 $LOCATION = "japaneast"
 $APP_NAME = "brightpath"
 $PLAN_NAME = "plan-asl-system"
-$DB_HOST = "aws-0-ap-northeast-1.pooler.supabase.com"
-$DB_NAME = "postgres"
-$DB_USER = "postgres.dtyvgpweriwzyjahkcyk"
-$DB_PASS = "superbokeeer03"
+$DB_HOST = if ($env:DB_HOST) { $env:DB_HOST } else { "aws-0-ap-northeast-1.pooler.supabase.com" }
+$DB_NAME = if ($env:DB_NAME) { $env:DB_NAME } else { "postgres" }
+$DB_USER = if ($env:DB_USER) { $env:DB_USER } else { "postgres.dtyvgpweriwzyjahkcyk" }
+$DB_PASS = $env:DB_PASSWORD
 
 Write-Host "1. Creating Azure Resource Group ($RESOURCE_GROUP)..." -ForegroundColor Cyan
 az group create --name $RESOURCE_GROUP --location $LOCATION

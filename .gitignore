@@ -52,3 +52,19 @@ venv/
 env/
 *.log
 
+# Temporary & maintenance scripts with sensitive DB access
+check_*.py
+inspect_*.py
+clean_*.py
+delete_*.py
+list_*.py
+create_*.py
+generate_*.py
+redesign_*.py
+polish_*.py
+fix_*.py
+render_*.py
+deploy_azure.ps1
+*.zip
+scratch/
+

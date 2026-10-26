@@ -21,6 +21,7 @@ import { COLORS } from "../../context/theme";
 import { useAccessibility } from "../../context/AccessibilityContext";
 import { getCachedTopicLessons, getCachedStudentProgress } from "../../context/OfflineCache";
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { translateToAslGloss } from "../../context/aslTranslator";
 
 // --- Types -------------------------------------------------------------------
 
@@ -128,9 +129,15 @@ export default function DifficultyScreen() {
         body: JSON.stringify({ text: textToTranslate, direction: 'en_to_asl' }),
       });
       const data = await res.json();
-      setAslResult(data.result?.trim() || `[ASL version]: "${textToTranslate}"`);
+      const resText = data.result?.trim();
+      if (resText) {
+        setAslResult(resText);
+      } else {
+        setAslResult(translateToAslGloss(textToTranslate));
+      }
     } catch {
-      setAslResult('Could not connect to translation server.');
+      // Local client-side ASL Gloss fallback if server is unreachable
+      setAslResult(translateToAslGloss(textToTranslate));
     } finally {
       setAslLoading(false);
     }
@@ -291,7 +298,7 @@ export default function DifficultyScreen() {
   const currentSlide = activeLesson?.slides?.[activeDescIndex];
   const slideText = currentSlide
     ? isDeafEnglish
-      ? currentSlide.description_text.toUpperCase()
+      ? translateToAslGloss(currentSlide.description_text)
       : currentSlide.description_text
     : '';
 
