@@ -255,8 +255,6 @@ export default function TranslateScreen() {
   const [translatedText, setTranslatedText] = useState("");
   const [loading, setLoading] = useState(false);
   const [direction, setDirection] = useState<Direction>("en_to_asl");
-  const [engineMode, setEngineMode] = useState<"rule" | "neural">("rule");
-  const [engineInfo, setEngineInfo] = useState<string | null>(null);
 
   const fromLabel = direction === "en_to_asl" ? "Basic English" : "ASL Gloss";
   const toLabel = direction === "en_to_asl" ? "ASL Gloss" : "Basic English";
@@ -267,7 +265,6 @@ export default function TranslateScreen() {
 
   const handleSwap = () => {
     setDirection((d) => (d === "en_to_asl" ? "asl_to_en" : "en_to_asl"));
-    setEngineInfo(null);
     if (translatedText) {
       setInputText(translatedText);
       setTranslatedText("");
@@ -281,15 +278,13 @@ export default function TranslateScreen() {
     if (!inputText.trim()) return;
     setLoading(true);
     setTranslatedText("");
-    setEngineInfo(null);
     try {
       const response = await fetch(TRANSLATE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           text: inputText, 
-          direction,
-          force_engine: engineMode 
+          direction 
         }),
       });
       if (!response.ok) {
@@ -299,20 +294,14 @@ export default function TranslateScreen() {
       const res = data.result ?? data.error;
       if (res) {
         setTranslatedText(res);
-        if (data.engine) {
-          const lat = data.latency_ms ? ` (${data.latency_ms} ms)` : "";
-          setEngineInfo(`${data.engine}${lat}`);
-        }
       } else {
         const fallback = direction === "en_to_asl" ? localEnglishToAsl(inputText) : localAslToEnglish(inputText);
         setTranslatedText(fallback);
-        setEngineInfo("local-offline");
       }
     } catch (error: any) {
       console.log("Translation server unreachable, falling back to local engine:", error);
       const fallback = direction === "en_to_asl" ? localEnglishToAsl(inputText) : localAslToEnglish(inputText);
       setTranslatedText(fallback);
-      setEngineInfo("local-offline");
     } finally {
       setLoading(false);
     }
@@ -321,7 +310,6 @@ export default function TranslateScreen() {
   const handleClear = () => {
     setInputText("");
     setTranslatedText("");
-    setEngineInfo(null);
   };
 
   return (
@@ -335,66 +323,6 @@ export default function TranslateScreen() {
         <View style={styles.header}>
           <Text style={styles.title}>Translation Tool</Text>
           <Text style={styles.subtitle}>Translate between Basic English and ASL Gloss</Text>
-        </View>
-
-        {/* Engine Mode Selector */}
-        <View style={styles.engineSelectorCard}>
-          <Text style={styles.engineSelectorLabel}>ENGINE MODE</Text>
-          <View style={styles.enginePillRow}>
-            <TouchableOpacity
-              style={[
-                styles.enginePill,
-                engineMode === "rule" && styles.enginePillActiveRule,
-              ]}
-              onPress={() => {
-                setEngineMode("rule");
-                setEngineInfo(null);
-              }}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name="flash"
-                size={14}
-                color={engineMode === "rule" ? "#FFFFFF" : COLORS.textSecondary}
-                style={{ marginRight: 4 }}
-              />
-              <Text
-                style={[
-                  styles.enginePillText,
-                  engineMode === "rule" && styles.enginePillTextActive,
-                ]}
-              >
-                Fast Linguistic
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.enginePill,
-                engineMode === "neural" && styles.enginePillActiveNeural,
-              ]}
-              onPress={() => {
-                setEngineMode("neural");
-                setEngineInfo(null);
-              }}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name="hardware-chip"
-                size={14}
-                color={engineMode === "neural" ? "#FFFFFF" : COLORS.textSecondary}
-                style={{ marginRight: 4 }}
-              />
-              <Text
-                style={[
-                  styles.enginePillText,
-                  engineMode === "neural" && styles.enginePillTextActive,
-                ]}
-              >
-                Neural mBART-50
-              </Text>
-            </TouchableOpacity>
-          </View>
         </View>
 
         {/* Direction Swap Card */}
@@ -479,36 +407,12 @@ export default function TranslateScreen() {
               <View style={styles.resultTitleRow}>
                 <Ionicons name="checkmark-circle" size={18} color={COLORS.primary} />
                 <Text style={styles.resultTitle}>{toLabel}</Text>
-                {engineInfo && (
-                  <View
-                    style={[
-                      styles.engineBadge,
-                      engineInfo.includes("mbart")
-                        ? styles.engineBadgeNeural
-                        : styles.engineBadgeRule,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.engineBadgeText,
-                        engineInfo.includes("mbart")
-                          ? styles.engineBadgeTextNeural
-                          : styles.engineBadgeTextRule,
-                      ]}
-                    >
-                      {engineInfo.includes("mbart")
-                        ? `🧠 ${engineInfo}`
-                        : `⚡ ${engineInfo}`}
-                    </Text>
-                  </View>
-                )}
               </View>
               <TouchableOpacity
                 onPress={() => {
                   setInputText(translatedText);
                   setDirection((d) => (d === "en_to_asl" ? "asl_to_en" : "en_to_asl"));
                   setTranslatedText("");
-                  setEngineInfo(null);
                 }}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
@@ -706,82 +610,5 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: COLORS.textPrimary,
     lineHeight: 25,
-  },
-  // Engine Selector Card
-  engineSelectorCard: {
-    backgroundColor: COLORS.card,
-    borderRadius: 14,
-    padding: 10,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  engineSelectorLabel: {
-    fontSize: 10,
-    fontWeight: "800",
-    color: COLORS.textSecondary,
-    letterSpacing: 0.6,
-    marginBottom: 6,
-    marginLeft: 4,
-  },
-  enginePillRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  enginePill: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: "#F1F5F9",
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-  },
-  enginePillActiveRule: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  enginePillActiveNeural: {
-    backgroundColor: "#7C3AED",
-    borderColor: "#6D28D9",
-  },
-  enginePillText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: COLORS.textSecondary,
-  },
-  enginePillTextActive: {
-    color: "#FFFFFF",
-    fontWeight: "700",
-  },
-  // Engine Result Badge
-  engineBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-    marginLeft: 6,
-  },
-  engineBadgeRule: {
-    backgroundColor: "#EFF6FF",
-    borderWidth: 1,
-    borderColor: "#BFDBFE",
-  },
-  engineBadgeNeural: {
-    backgroundColor: "#F5F3FF",
-    borderWidth: 1,
-    borderColor: "#DDD6FE",
-  },
-  engineBadgeText: {
-    fontSize: 10,
-    fontWeight: "700",
-  },
-  engineBadgeTextRule: {
-    color: "#1D4ED8",
-  },
-  engineBadgeTextNeural: {
-    color: "#6D28D9",
   },
 });

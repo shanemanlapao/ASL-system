@@ -87,6 +87,7 @@ export default function QuizScreen() {
     accuracy_pct: number;
     passed: boolean;
     stars_earned: number;
+    is_repeat_practice?: boolean;
     unlocked_medium: boolean;
     unlocked_hard: boolean;
     unlocked_next_lesson: boolean;
@@ -1006,7 +1007,9 @@ export default function QuizScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.rewardStarCount}>+{earnedStars} Stars Earned!</Text>
                 <Text style={styles.rewardSubtext}>
-                  +{starRate} stars per correct answer ({score}/{quizQuestions.length})
+                  {completionResult?.is_repeat_practice
+                    ? 'Practice bonus for re-clearing this tier'
+                    : `+${starRate} stars per correct answer (${score}/${quizQuestions.length})`}
                 </Text>
               </View>
             </View>

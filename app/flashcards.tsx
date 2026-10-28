@@ -122,6 +122,37 @@ const FLASHCARD_CONTENT: Record<number, { example: string }> = {
   },
 };
 
+const FLASHCARD_FRONT_CONTEXT: Record<number, string> = {
+  // Story Grammar
+  1: "This character is Rad.",
+  2: "This place is a sunny park.",
+  3: "Rad's kite is stuck in the tree.",
+  4: "A helper rescues the kite.",
+  5: "First, Rad builds his kite.",
+  6: "Finally, the kite flies high.",
+  // Mathematics
+  201: "The shape slides to the right.",
+  202: "The shape flips like a mirror.",
+  203: "The shape turns around a point.",
+  204: "This line folds the shape in half.",
+  205: "Both shapes are the exact same.",
+  206: "This grid shows shape positions.",
+  // Technology and Livelihood Education (TLE / ICT)
+  301: "The camera shutter is closed.",
+  302: "The microphone is turned off.",
+  303: "This is a private class link.",
+  304: "This is a secret safety password.",
+  305: "Bright light makes signs clear.",
+  306: "Type polite school messages here.",
+  // Araling Panlipunan
+  401: "This is the Katipunan flag.",
+  402: "This hero is Andres Bonifacio.",
+  403: "This ritual is the Sanduguan.",
+  404: "This book is the Kartilya.",
+  405: "This newspaper means Kalayaan.",
+  406: "This hero is Gregoria de Jesus.",
+};
+
 interface Flashcard {
   id: number;
   term: string;
@@ -375,7 +406,9 @@ export default function FlashcardsScreen() {
                     </View>
                   )}
                   <Text style={styles.cardTerm}>{currentCard.term}</Text>
-                  <Text style={styles.cardFrontHint}>Tap to reveal ASL Gloss & Definition</Text>
+                  <Text style={styles.cardFrontHint}>
+                    {FLASHCARD_FRONT_CONTEXT[currentCard.id] || "Tap to reveal ASL Gloss & Definition"}
+                  </Text>
                   <View style={styles.flipPrompt}>
                     <Ionicons name="repeat-outline" size={16} color="#9CA3AF" />
                     <Text style={styles.flipPromptText}>Tap to Flip</Text>
@@ -583,7 +616,14 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   cardTerm: { fontSize: 26, fontWeight: 'bold', color: '#1F2937', textAlign: 'center', marginBottom: 8 },
-  cardFrontHint: { fontSize: 13, color: '#6B7280', textAlign: 'center', marginBottom: 24 },
+  cardFrontHint: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#374151',
+    textAlign: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 12,
+  },
   flipPrompt: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   flipPromptText: { fontSize: 12, color: '#9CA3AF', fontWeight: '600' },
   aslBox: {

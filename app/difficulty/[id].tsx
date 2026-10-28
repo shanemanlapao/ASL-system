@@ -83,7 +83,9 @@ const getStoryGrammarBadge = (index: number) => {
 
 export default function DifficultyScreen() {
   const { id: lessonGroupId, subjectId, topicId, deafEnglish: deafEngParam } = useLocalSearchParams();
-  const theme = THEME_COLORS[topicId as string] || THEME_COLORS[subjectId as string] || THEME_COLORS['story-grammar'];
+  const [resolvedTopicId, setResolvedTopicId] = useState<string>((topicId as string) || '');
+  const activeTopic = (topicId as string) || resolvedTopicId;
+  const theme = THEME_COLORS[activeTopic] || THEME_COLORS[subjectId as string] || THEME_COLORS['story-grammar'];
   const { user } = useAuth();
   const userId = user?.id || 1;
   const { highContrast, hapticsEnabled } = useAccessibility();
@@ -143,10 +145,10 @@ export default function DifficultyScreen() {
     }
   };
 
-  const fetchData = async () => {
+  const fetchData = async (targetTopicId: string) => {
     try {
       // 1. Fetch lesson group content
-      const res = await fetch(`${API_URL}/lessons/${topicId}`);
+      const res = await fetch(`${API_URL}/lessons/${targetTopicId}`);
       if (res.ok) {
         const groups = await res.json();
         const foundGroup = groups.find((g: any) => g.id === Number(lessonGroupId));
@@ -161,7 +163,7 @@ export default function DifficultyScreen() {
       }
 
       // 2. Fetch student progress
-      const progRes = await fetch(`${API_URL}/student/${userId}/profile/${topicId}`);
+      const progRes = await fetch(`${API_URL}/student/${userId}/profile/${targetTopicId}`);
       if (progRes.ok) {
         const progData = await progRes.json();
         if (progData.lesson_progress) {
@@ -174,7 +176,7 @@ export default function DifficultyScreen() {
     } catch (err) {
       console.log("Error fetching difficulty data, falling back to cache (offline):", err);
       try {
-        const cachedGroups = await getCachedTopicLessons(topicId as string);
+        const cachedGroups = await getCachedTopicLessons(targetTopicId);
         if (cachedGroups) {
           const foundGroup = cachedGroups.find((g: any) => g.id === Number(lessonGroupId));
           if (foundGroup) {
@@ -186,7 +188,7 @@ export default function DifficultyScreen() {
             setLessonsMap(map);
           }
         }
-        const cachedProg = await getCachedStudentProgress(userId, topicId as string);
+        const cachedProg = await getCachedStudentProgress(userId, targetTopicId);
         if (cachedProg) {
           const progList = Array.isArray(cachedProg) ? cachedProg : Object.values(cachedProg);
           const found = progList.find((p: any) => p.lesson_group_id === Number(lessonGroupId));
@@ -203,9 +205,41 @@ export default function DifficultyScreen() {
   };
 
   useEffect(() => {
-    if (lessonGroupId && topicId) {
-      fetchData();
-    }
+    let isMounted = true;
+    const init = async () => {
+      if (!lessonGroupId) {
+        setLoading(false);
+        return;
+      }
+
+      let curTopic = (topicId as string) || resolvedTopicId;
+
+      if (!curTopic) {
+        try {
+          const res = await fetch(`${API_URL}/lesson-group/${lessonGroupId}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (isMounted && data.topic_id) {
+              curTopic = data.topic_id;
+              setResolvedTopicId(data.topic_id);
+            }
+          }
+        } catch (err) {
+          console.log("Error resolving topic for lesson group:", err);
+        }
+      }
+
+      if (curTopic) {
+        if (isMounted) await fetchData(curTopic);
+      } else {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    init();
+    return () => {
+      isMounted = false;
+    };
   }, [lessonGroupId, topicId, userId]);
 
   // Slide animation values for smooth horizontal transitions
@@ -343,8 +377,24 @@ export default function DifficultyScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* 2. Difficulty Tier Selector Cards */}
-        {(['easy', 'medium', 'hard'] as const).map(diff => {
+        {Object.keys(lessonsMap).length === 0 ? (
+          <View style={[styles.centerContainer, { paddingTop: 60 }]}>
+            <Ionicons name="alert-circle-outline" size={54} color={COLORS.textSecondary} />
+            <Text style={{ marginTop: 14, fontSize: 16, color: COLORS.textPrimary, fontWeight: '700' }}>
+              Lesson not found
+            </Text>
+            <Text style={{ marginTop: 6, fontSize: 13, color: COLORS.textSecondary, textAlign: 'center', paddingHorizontal: 30 }}>
+              The requested lesson could not be loaded or has not been published yet.
+            </Text>
+            <TouchableOpacity
+              onPress={() => router.back()}
+              style={{ marginTop: 20, paddingHorizontal: 22, paddingVertical: 10, backgroundColor: theme.primary, borderRadius: 12 }}
+            >
+              <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 14 }}>Go Back</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          (['easy', 'medium', 'hard'] as const).map(diff => {
           const unlocked = isUnlocked(diff);
           const lessonExists = !!lessonsMap[diff];
           const best = getBestScore(diff);
@@ -416,7 +466,7 @@ export default function DifficultyScreen() {
               </View>
             </TouchableOpacity>
           );
-        })}
+        }))}
       </ScrollView>
 
       {/* 3. DHH Interactive Slide Reader Modal */}

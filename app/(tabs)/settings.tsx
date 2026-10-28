@@ -243,9 +243,6 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.settingTextContainer}>
               <Text style={styles.settingTitle}>Vibrate on Tap</Text>
-              <Text style={styles.settingSubtitle}>
-                Feel a buzz when tapping quiz answers
-              </Text>
             </View>
             <Switch
               value={hapticsEnabled}
@@ -262,9 +259,6 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.settingTextContainer}>
               <Text style={styles.settingTitle}>Bold & High Contrast</Text>
-              <Text style={styles.settingSubtitle}>
-                Darker text and sharper borders
-              </Text>
             </View>
             <Switch
               value={highContrast}
@@ -281,7 +275,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="person-outline"
             title="Edit Profile Name"
-            subtitle="Change your student display name"
             color={COLORS.primary}
             bgColor={COLORS.primaryLight}
             onPress={() => {
@@ -292,7 +285,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="lock-closed-outline"
             title="Change Password"
-            subtitle="Update your login password"
             color={COLORS.primary}
             bgColor={COLORS.primaryLight}
             isLast
@@ -306,7 +298,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="trophy-outline"
             title="Trophies & Badges"
-            subtitle="See badges you have unlocked"
             color="#D97706"
             bgColor="#FEF3C7"
             onPress={() => router.push("/badges")}
@@ -314,7 +305,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="flame-outline"
             title="Class Leaderboard"
-            subtitle="See class rankings and scores"
             color={COLORS.streak}
             bgColor={COLORS.streakBg}
             isLast
@@ -328,7 +318,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="document-text-outline"
             title="Learning Report"
-            subtitle="Check your quiz scores and time"
             color={COLORS.aslTeal}
             bgColor={COLORS.aslTealBg}
             onPress={() => router.push("/report")}
@@ -336,7 +325,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="documents-outline"
             title="Past Quiz History"
-            subtitle="Review all your past quiz tries"
             color="#6366F1"
             bgColor="#EEF2FF"
             isLast
@@ -350,7 +338,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="help-circle-outline"
             title="How to Use This App"
-            subtitle="Guides for ASL Helper, Hints, and Streaks"
             color={COLORS.primary}
             bgColor={COLORS.primaryLight}
             isLast
@@ -364,7 +351,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="document-text-outline"
             title="Terms of Service"
-            subtitle="Student code of conduct & rules"
             color="#0284C7"
             bgColor="#E0F2FE"
             onPress={() => router.push("/legal?tab=terms" as any)}
@@ -372,7 +358,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="shield-checkmark-outline"
             title="Privacy Policy"
-            subtitle="Data protection under RA 10173"
             color="#059669"
             bgColor="#ECFDF5"
             onPress={() => router.push("/legal?tab=privacy" as any)}
@@ -380,7 +365,6 @@ export default function SettingsScreen() {
           <SettingItem
             icon="key-outline"
             title="App Permissions & Data"
-            subtitle="View Android storage, camera & vibration usage"
             color="#7C3AED"
             bgColor="#F3E8FF"
             isLast
@@ -401,7 +385,6 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.settingTextContainer}>
               <Text style={[styles.settingTitle, { color: "#EF4444" }]}>Log Out</Text>
-              <Text style={styles.settingSubtitle}>Sign out of this student account</Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color="#EF4444" />
           </TouchableOpacity>
@@ -777,9 +760,9 @@ const styles = StyleSheet.create({
   settingItem: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 14,
+    paddingVertical: 12,
     paddingHorizontal: 16,
-    minHeight: 60,
+    minHeight: 56,
   },
   settingItemBorder: {
     borderBottomWidth: 1,
@@ -798,7 +781,7 @@ const styles = StyleSheet.create({
     paddingRight: 8,
   },
   settingTitle: {
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: "700",
     color: COLORS.textPrimary,
   },

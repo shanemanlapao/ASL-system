@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -22,6 +22,7 @@ import {
   addLocalStars,
   getCachedHomeSummary,
 } from '../../context/OfflineCache';
+import Confetti from '../../components/Confetti';
 
 // --- Interfaces ---------------------------------------------------------------
 
@@ -60,6 +61,17 @@ export default function QuestTabScreen() {
   const [timeUntilMidnight, setTimeUntilMidnight] = useState<string>('');
   const [storyReadDone, setStoryReadDone] = useState<boolean>(false);
   const [flashcardsDoneCount, setFlashcardsDoneCount] = useState<number>(0);
+  const [showConfetti, setShowConfetti] = useState<boolean>(false);
+  const [topicProgress, setTopicProgress] = useState<Record<string, { progress: number; stars: number; attempts: number }>>({});
+  const confettiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (confettiTimeoutRef.current) {
+        clearTimeout(confettiTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const getLocalDateString = useCallback(() => {
     const d = new Date();
@@ -94,6 +106,28 @@ export default function QuestTabScreen() {
         setTotalStars(cachedStars);
       } else if (cachedHome?.total_stars !== undefined) {
         setTotalStars(cachedHome.total_stars);
+      }
+
+      if (cachedHome?.topics) {
+        const map: Record<string, { progress: number; stars: number; attempts: number }> = {};
+        if (Array.isArray(cachedHome.topics)) {
+          cachedHome.topics.forEach((t: any) => {
+            map[t.topic_id] = {
+              progress: t.progress_pct ?? t.progress ?? 0,
+              stars: t.stars_earned ?? t.stars ?? 0,
+              attempts: t.attempts ?? 0,
+            };
+          });
+        } else if (typeof cachedHome.topics === 'object') {
+          Object.entries(cachedHome.topics).forEach(([tid, t]: [string, any]) => {
+            map[tid] = {
+              progress: t.progress_pct ?? t.progress ?? 0,
+              stars: t.stars_earned ?? t.stars ?? 0,
+              attempts: t.attempts ?? 0,
+            };
+          });
+        }
+        setTopicProgress(map);
       }
 
       if (cachedHome?.current_streak !== undefined) {
@@ -142,6 +176,27 @@ export default function QuestTabScreen() {
         if (sumData.total_stars !== undefined) {
           setTotalStars(sumData.total_stars);
           saveLocalTotalStars(userId, sumData.total_stars).catch(() => {});
+        }
+        if (sumData.topics) {
+          const map: Record<string, { progress: number; stars: number; attempts: number }> = {};
+          if (Array.isArray(sumData.topics)) {
+            sumData.topics.forEach((t: any) => {
+              map[t.topic_id] = {
+                progress: t.progress_pct ?? t.progress ?? 0,
+                stars: t.stars_earned ?? t.stars ?? 0,
+                attempts: t.attempts ?? 0,
+              };
+            });
+          } else if (typeof sumData.topics === 'object') {
+            Object.entries(sumData.topics).forEach(([tid, t]: [string, any]) => {
+              map[tid] = {
+                progress: t.progress_pct ?? t.progress ?? 0,
+                stars: t.stars_earned ?? t.stars ?? 0,
+                attempts: t.attempts ?? 0,
+              };
+            });
+          }
+          setTopicProgress(map);
         }
       }
     } catch (err) {
@@ -209,6 +264,15 @@ export default function QuestTabScreen() {
     if (claimingMission || claimedMissions[missionId]) return;
     setClaimingMission(missionId);
 
+    // Trigger celebratory confetti burst
+    if (confettiTimeoutRef.current) {
+      clearTimeout(confettiTimeoutRef.current);
+    }
+    setShowConfetti(true);
+    confettiTimeoutRef.current = setTimeout(() => {
+      setShowConfetti(false);
+    }, 3500);
+
     const todayStr = getLocalDateString();
     const updatedClaimed = { ...claimedMissions, [missionId]: true };
 
@@ -242,11 +306,44 @@ export default function QuestTabScreen() {
     }
   };
 
+  const handleStoryExplorerPress = () => {
+    // Determine which core subject the student has taken the least
+    const coreSubjects = [
+      'story-grammar',
+      'mathematics',
+      'technology-and-livelihood-education',
+      'araling-panlipunan',
+    ];
+
+    const sorted = [...coreSubjects].map(id => {
+      const stats = topicProgress[id] || { progress: 0, stars: 0, attempts: 0 };
+      return {
+        id,
+        progress: stats.progress,
+        stars: stats.stars,
+        attempts: stats.attempts,
+        score: (stats.attempts * 10) + stats.progress,
+      };
+    }).sort((a, b) => {
+      if (a.score !== b.score) {
+        return a.score - b.score;
+      }
+      if (a.progress !== b.progress) {
+        return a.progress - b.progress;
+      }
+      return a.stars - b.stars;
+    });
+
+    const targetTopicId = sorted[0]?.id || 'story-grammar';
+    router.push(`/topic/${targetTopicId}?subjectId=english` as any);
+  };
+
   const completedQuizSlots = dailyQuiz?.completed_count ?? 0;
   const isQuizMissionDone = completedQuizSlots >= 1;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+      {showConfetti && <Confetti count={70} />}
       {/* 1. Sleek Compact Header Matching Brand Theme */}
       <View style={styles.header}>
         <View>
@@ -398,7 +495,7 @@ export default function QuestTabScreen() {
               <TouchableOpacity
                 style={styles.actionButton}
                 activeOpacity={0.8}
-                onPress={() => router.push('/difficulty/1' as any)}
+                onPress={handleStoryExplorerPress}
               >
                 <Text style={styles.actionButtonText}>Read</Text>
                 <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />

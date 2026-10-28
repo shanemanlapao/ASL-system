@@ -2148,6 +2148,28 @@ def create_lesson(req: LessonCreateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/lesson-group/{group_id}")
+def get_lesson_group_info(group_id: int):
+    """Returns basic lesson group metadata for routing and fallbacks."""
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, topic_id, title, order_index FROM lesson_groups WHERE id = %s AND COALESCE(is_deleted, FALSE) = FALSE",
+            (group_id,)
+        )
+        group = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not group:
+            raise HTTPException(status_code=404, detail="Lesson group not found")
+        return group
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/lessons/{topic_id}")
 def get_lessons_by_topic(topic_id: str):
     """Returns all lessons for a topic, grouped by lesson_group_id."""
@@ -2533,6 +2555,30 @@ def _get_or_create_lesson_progress(cur, user_id: int, lesson_group_id: int) -> d
     return dict(cur.fetchone())
 
 
+def _calculate_topic_mastery_accuracy(cur, user_id: int, topic_id: str) -> float:
+    """
+    Enhancement 1: Calculates true topic accuracy based on unique lesson best scores.
+    Averages the highest score achieved on each attempted lesson group in this topic.
+    Grinding the same easy lesson repeatedly will NOT artificially inflate this accuracy.
+    """
+    cur.execute("""
+        SELECT 
+            GREATEST(slp.easy_best_score, slp.medium_best_score, slp.hard_best_score) AS group_best
+        FROM student_lesson_progress slp
+        JOIN lesson_groups lg ON slp.lesson_group_id = lg.id
+        WHERE slp.user_id = %s AND lg.topic_id = %s
+          AND COALESCE(lg.is_deleted, FALSE) = FALSE
+          AND (slp.attempts_count > 0 OR slp.easy_passed OR slp.medium_passed OR slp.hard_passed OR slp.easy_best_score > 0)
+    """, (user_id, topic_id))
+    rows = cur.fetchall()
+    if not rows:
+        return 0.0
+    scores = [r["group_best"] for r in rows if r["group_best"] is not None and r["group_best"] > 0]
+    if not scores:
+        return 0.0
+    return round(float(sum(scores) / len(scores)), 1)
+
+
 @app.get("/quiz/session/{quiz_id}")
 def start_quiz_session(quiz_id: int, user_id: int, mode: Optional[str] = None):
     """
@@ -2739,46 +2785,64 @@ def complete_quiz_session(attempt_id: int, body: QuizCompleteRequest):
         unlocked_medium = False
         unlocked_hard = False
         unlocked_next_lesson = False
+        already_passed = False
+        is_repeat_practice = False
 
         if lesson_group_id:
             progress = _get_or_create_lesson_progress(cur, user_id, lesson_group_id)
 
             if difficulty == 'easy':
-                new_best = max(progress["easy_best_score"], accuracy_pct)
-                easy_passed_now = progress["easy_passed"] or passed
-                unlocked_medium = passed and not progress["easy_passed"]
-                unlocked_next_lesson = passed and not progress["easy_passed"]
+                already_passed = bool(progress.get("easy_passed"))
+                new_best = max(progress.get("easy_best_score") or 0.0, accuracy_pct)
+                easy_passed_now = already_passed or passed
+                unlocked_medium = passed and not already_passed
+                unlocked_next_lesson = passed and not already_passed
                 cur.execute(
                     """UPDATE student_lesson_progress
-                       SET easy_best_score = %s, easy_passed = %s, last_updated = NOW()
+                       SET easy_best_score = %s, easy_passed = %s,
+                           attempts_count = attempts_count + 1, last_updated = NOW()
                        WHERE user_id = %s AND lesson_group_id = %s""",
                     (new_best, easy_passed_now, user_id, lesson_group_id)
                 )
             elif difficulty == 'medium':
-                new_best = max(progress["medium_best_score"], accuracy_pct)
-                medium_passed_now = progress["medium_passed"] or passed
-                unlocked_hard = passed and not progress["medium_passed"]
+                already_passed = bool(progress.get("medium_passed"))
+                new_best = max(progress.get("medium_best_score") or 0.0, accuracy_pct)
+                medium_passed_now = already_passed or passed
+                unlocked_hard = passed and not already_passed
                 cur.execute(
                     """UPDATE student_lesson_progress
-                       SET medium_best_score = %s, medium_passed = %s, last_updated = NOW()
+                       SET medium_best_score = %s, medium_passed = %s,
+                           attempts_count = attempts_count + 1, last_updated = NOW()
                        WHERE user_id = %s AND lesson_group_id = %s""",
                     (new_best, medium_passed_now, user_id, lesson_group_id)
                 )
             elif difficulty == 'hard':
-                new_best = max(progress["hard_best_score"], accuracy_pct)
-                hard_passed_now = progress["hard_passed"] or passed
+                already_passed = bool(progress.get("hard_passed"))
+                new_best = max(progress.get("hard_best_score") or 0.0, accuracy_pct)
+                hard_passed_now = already_passed or passed
                 cur.execute(
                     """UPDATE student_lesson_progress
-                       SET hard_best_score = %s, hard_passed = %s, last_updated = NOW()
+                       SET hard_best_score = %s, hard_passed = %s,
+                           attempts_count = attempts_count + 1, last_updated = NOW()
                        WHERE user_id = %s AND lesson_group_id = %s""",
                     (new_best, hard_passed_now, user_id, lesson_group_id)
                 )
 
-        # ── Update topic-level student profile ────────────────────────────────
-        # Star reward: +3 (easy), +4 (medium), +6 (hard) per correct question, awarded only on pass
+        # ── Enhancement 3: Star reward & Anti-Farming Safeguard ────────────────
+        # First-time pass: full stars (+3 easy, +4 medium, +6 hard per correct answer)
+        # Repeat pass: +2 flat practice bonus so students cannot farm unlimited stars on easy tiers
         STAR_RATES = {"easy": 3, "medium": 4, "hard": 6}
         star_rate = STAR_RATES.get(difficulty.lower(), 3)
-        stars_earned = (body.score * star_rate) if passed else 0
+        if passed:
+            if already_passed:
+                stars_earned = 2  # Practice bonus
+                is_repeat_practice = True
+            else:
+                stars_earned = body.score * star_rate  # Full first-time bounty
+                is_repeat_practice = False
+        else:
+            stars_earned = 0
+            is_repeat_practice = False
 
         # Ensure topic_id exists; if not, query it from the quiz or fallback
         if not topic_id:
@@ -2786,16 +2850,17 @@ def complete_quiz_session(attempt_id: int, body: QuizCompleteRequest):
             q_row = cur.fetchone()
             topic_id = q_row["topic_id"] if q_row and q_row.get("topic_id") else "story-grammar"
 
+        # ── Enhancement 1: Calculate Unique-Lesson Topic Accuracy ─────────────
+        new_avg = _calculate_topic_mastery_accuracy(cur, user_id, topic_id)
+        if new_avg == 0.0:
+            new_avg = accuracy_pct
+
         cur.execute(
             "SELECT * FROM student_profiles WHERE user_id = %s AND topic_id = %s",
             (user_id, topic_id)
         )
         profile = cur.fetchone()
         if profile:
-            new_avg = round(
-                (profile["avg_accuracy"] * profile["quizzes_completed"] + accuracy_pct)
-                / (profile["quizzes_completed"] + 1), 2
-            )
             avg_time = round(
                 (profile["avg_time_seconds"] * profile["quizzes_completed"] + (body.time_spent_seconds / total))
                 / (profile["quizzes_completed"] + 1), 2
@@ -2816,10 +2881,11 @@ def complete_quiz_session(attempt_id: int, body: QuizCompleteRequest):
                    (user_id, topic_id, avg_accuracy, avg_time_seconds, quizzes_completed, total_stars, knowledge_level)
                    VALUES (%s, %s, %s, %s, 1, %s, %s)
                    ON CONFLICT (user_id, topic_id) DO UPDATE
-                   SET total_stars = student_profiles.total_stars + EXCLUDED.total_stars,
+                   SET avg_accuracy = EXCLUDED.avg_accuracy,
+                       total_stars = student_profiles.total_stars + EXCLUDED.total_stars,
                        quizzes_completed = student_profiles.quizzes_completed + 1,
                        last_updated = NOW()""",
-                (user_id, topic_id, accuracy_pct, avg_time, stars_earned, difficulty)
+                (user_id, topic_id, new_avg, avg_time, stars_earned, difficulty)
             )
 
         # Phase 3: update streak on every quiz completion
@@ -2837,6 +2903,7 @@ def complete_quiz_session(attempt_id: int, body: QuizCompleteRequest):
             "passed": passed,
             "stars_earned": stars_earned,
             "star_rate": star_rate,
+            "is_repeat_practice": is_repeat_practice,
             "unlocked_medium": unlocked_medium,
             "unlocked_hard": unlocked_hard,
             "unlocked_next_lesson": unlocked_next_lesson,
@@ -2918,94 +2985,78 @@ def offline_sync_quiz(body: QuizOfflineSyncRequest):
         unlocked_medium = False
         unlocked_hard = False
         unlocked_next_lesson = False
+        already_passed = False
+        is_repeat_practice = False
 
         if lesson_group_id:
-            cur.execute(
-                "SELECT * FROM student_lesson_progress WHERE user_id = %s AND lesson_group_id = %s",
-                (user_id, lesson_group_id)
-            )
-            prog = cur.fetchone()
+            progress = _get_or_create_lesson_progress(cur, user_id, lesson_group_id)
 
-            if not prog:
+            if difficulty == 'easy':
+                already_passed = bool(progress.get("easy_passed"))
+                new_best = max(progress.get("easy_best_score") or 0.0, accuracy_pct)
+                easy_passed_now = already_passed or passed
+                unlocked_medium = passed and not already_passed
+                unlocked_next_lesson = passed and not already_passed
                 cur.execute(
-                    """INSERT INTO student_lesson_progress
-                       (user_id, lesson_group_id, easy_passed, medium_passed, hard_passed,
-                        easy_best_score, medium_best_score, hard_best_score, attempts_count)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)""",
-                    (
-                        user_id, lesson_group_id,
-                        passed if difficulty == "easy" else False,
-                        passed if difficulty == "medium" else False,
-                        passed if difficulty == "hard" else False,
-                        accuracy_pct if difficulty == "easy" else 0.0,
-                        accuracy_pct if difficulty == "medium" else 0.0,
-                        accuracy_pct if difficulty == "hard" else 0.0,
-                    )
+                    """UPDATE student_lesson_progress
+                       SET easy_best_score = %s, easy_passed = %s,
+                           attempts_count = attempts_count + 1, last_updated = NOW()
+                       WHERE user_id = %s AND lesson_group_id = %s""",
+                    (new_best, easy_passed_now, user_id, lesson_group_id)
                 )
-                unlocked_medium = passed and difficulty == "easy"
-                unlocked_hard = passed and difficulty == "medium"
-                if difficulty == "easy":
-                    score_col = "easy_best_score"
-                    passed_col = "easy_passed"
-                elif difficulty == "medium":
-                    score_col = "medium_best_score"
-                    passed_col = "medium_passed"
-                else:
-                    score_col = "hard_best_score"
-                    passed_col = "hard_passed"
+            elif difficulty == 'medium':
+                already_passed = bool(progress.get("medium_passed"))
+                new_best = max(progress.get("medium_best_score") or 0.0, accuracy_pct)
+                medium_passed_now = already_passed or passed
+                unlocked_hard = passed and not already_passed
+                cur.execute(
+                    """UPDATE student_lesson_progress
+                       SET medium_best_score = %s, medium_passed = %s,
+                           attempts_count = attempts_count + 1, last_updated = NOW()
+                       WHERE user_id = %s AND lesson_group_id = %s""",
+                    (new_best, medium_passed_now, user_id, lesson_group_id)
+                )
+            elif difficulty == 'hard':
+                already_passed = bool(progress.get("hard_passed"))
+                new_best = max(progress.get("hard_best_score") or 0.0, accuracy_pct)
+                hard_passed_now = already_passed or passed
+                cur.execute(
+                    """UPDATE student_lesson_progress
+                       SET hard_best_score = %s, hard_passed = %s,
+                           attempts_count = attempts_count + 1, last_updated = NOW()
+                       WHERE user_id = %s AND lesson_group_id = %s""",
+                    (new_best, hard_passed_now, user_id, lesson_group_id)
+                )
 
-                curr_best = prog.get(score_col) or 0.0
-                new_best = max(curr_best, accuracy_pct)
-                already_passed = bool(prog.get(passed_col))
-                new_passed = already_passed or passed
-
-                if difficulty == "easy":
-                    cur.execute(
-                        """UPDATE student_lesson_progress
-                           SET easy_best_score = %s, easy_passed = %s,
-                               attempts_count = attempts_count + 1, last_updated = NOW()
-                           WHERE user_id = %s AND lesson_group_id = %s""",
-                        (new_best, new_passed, user_id, lesson_group_id)
-                    )
-                elif difficulty == "medium":
-                    cur.execute(
-                        """UPDATE student_lesson_progress
-                           SET medium_best_score = %s, medium_passed = %s,
-                               attempts_count = attempts_count + 1, last_updated = NOW()
-                           WHERE user_id = %s AND lesson_group_id = %s""",
-                        (new_best, new_passed, user_id, lesson_group_id)
-                    )
-                else:
-                    cur.execute(
-                        """UPDATE student_lesson_progress
-                           SET hard_best_score = %s, hard_passed = %s,
-                               attempts_count = attempts_count + 1, last_updated = NOW()
-                           WHERE user_id = %s AND lesson_group_id = %s""",
-                        (new_best, new_passed, user_id, lesson_group_id)
-                    )
-
-                if difficulty == "easy" and passed and not already_passed:
-                    unlocked_medium = True
-                elif difficulty == "medium" and passed and not already_passed:
-                    unlocked_hard = True
-
-        # 5. Stars and profiles
-        star_rates = {"easy": 3, "medium": 4, "hard": 6}
-        star_rate = star_rates.get(difficulty.lower(), 3)
-        stars_earned = (body.score * star_rate) if passed else 0
+        # ── Enhancement 3: Star reward & Anti-Farming Safeguard ────────────────
+        # First-time pass: full stars (+3 easy, +4 medium, +6 hard per correct answer)
+        # Repeat pass: +2 flat practice bonus
+        STAR_RATES = {"easy": 3, "medium": 4, "hard": 6}
+        star_rate = STAR_RATES.get(difficulty.lower(), 3)
+        if passed:
+            if already_passed:
+                stars_earned = 2  # Practice bonus
+                is_repeat_practice = True
+            else:
+                stars_earned = body.score * star_rate  # Full first-time bounty
+                is_repeat_practice = False
+        else:
+            stars_earned = 0
+            is_repeat_practice = False
 
         if not topic_id:
             cur.execute("SELECT topic_id FROM quizzes WHERE id = %s", (quiz_id,))
             q_row = cur.fetchone()
             topic_id = q_row["topic_id"] if q_row and q_row.get("topic_id") else "story-grammar"
 
+        # ── Enhancement 1: Calculate Unique-Lesson Topic Accuracy ─────────────
+        new_avg = _calculate_topic_mastery_accuracy(cur, user_id, topic_id)
+        if new_avg == 0.0:
+            new_avg = accuracy_pct
+
         cur.execute("SELECT * FROM student_profiles WHERE user_id = %s AND topic_id = %s", (user_id, topic_id))
         profile = cur.fetchone()
         if profile:
-            new_avg = round(
-                (profile["avg_accuracy"] * profile["quizzes_completed"] + accuracy_pct)
-                / (profile["quizzes_completed"] + 1), 2
-            )
             avg_time = round(
                 (profile["avg_time_seconds"] * profile["quizzes_completed"] + (body.time_spent_seconds / total))
                 / (profile["quizzes_completed"] + 1), 2
@@ -3026,10 +3077,11 @@ def offline_sync_quiz(body: QuizOfflineSyncRequest):
                    (user_id, topic_id, avg_accuracy, avg_time_seconds, quizzes_completed, total_stars, knowledge_level)
                    VALUES (%s, %s, %s, %s, 1, %s, %s)
                    ON CONFLICT (user_id, topic_id) DO UPDATE
-                   SET total_stars = student_profiles.total_stars + EXCLUDED.total_stars,
+                   SET avg_accuracy = EXCLUDED.avg_accuracy,
+                       total_stars = student_profiles.total_stars + EXCLUDED.total_stars,
                        quizzes_completed = student_profiles.quizzes_completed + 1,
                        last_updated = NOW()""",
-                (user_id, topic_id, accuracy_pct, avg_time, stars_earned, difficulty)
+                (user_id, topic_id, new_avg, avg_time, stars_earned, difficulty)
             )
 
         _update_student_streak(cur, user_id)
@@ -3046,6 +3098,7 @@ def offline_sync_quiz(body: QuizOfflineSyncRequest):
             "passed": passed,
             "stars_earned": stars_earned,
             "star_rate": star_rate,
+            "is_repeat_practice": is_repeat_practice,
             "unlocked_medium": unlocked_medium,
             "unlocked_hard": unlocked_hard,
             "unlocked_next_lesson": unlocked_next_lesson,
@@ -3135,7 +3188,7 @@ def get_student_report(user_id: int):
         )
         time_row = cur.fetchone()
 
-        # Per-topic breakdown
+        # Per-topic breakdown: calculate fresh unique-lesson accuracy for each topic
         cur.execute(
             "SELECT * FROM student_profiles WHERE user_id = %s ORDER BY topic_id",
             (user_id,)
@@ -3144,24 +3197,33 @@ def get_student_report(user_id: int):
 
         topic_breakdown = []
         weak_topics = []
+        topic_accuracies = []
         for p in profiles:
+            true_acc = _calculate_topic_mastery_accuracy(cur, user_id, p["topic_id"])
+            if true_acc == 0.0 and p["quizzes_completed"] > 0:
+                true_acc = p["avg_accuracy"]
+            if p["quizzes_completed"] > 0:
+                topic_accuracies.append(true_acc)
+
             topic_breakdown.append({
                 "topic_id": p["topic_id"],
                 "knowledge_level": p["knowledge_level"],
-                "avg_accuracy": round(p["avg_accuracy"], 1),
+                "avg_accuracy": round(true_acc, 1),
                 "quizzes_done": p["quizzes_completed"],
                 "total_stars": p["total_stars"],
             })
-            if p["avg_accuracy"] < 70.0 and p["quizzes_completed"] > 0:
+            if true_acc < 70.0 and p["quizzes_completed"] > 0:
                 weak_topics.append({
                     "topic_id": p["topic_id"],
-                    "accuracy": round(p["avg_accuracy"], 1),
+                    "accuracy": round(true_acc, 1),
                     "level": p["knowledge_level"],
                 })
 
-        # Recent attempts (last 10)
+        overall_acc = round(sum(topic_accuracies) / len(topic_accuracies), 1) if topic_accuracies else round(float(overall["overall_accuracy"]), 1)
+
+        # Recent attempts (last 50)
         cur.execute(
-            """SELECT a.id, a.score, a.total_questions, a.difficulty, a.time_spent_seconds,
+            """SELECT a.id, a.quiz_id, a.score, a.total_questions, a.difficulty, a.time_spent_seconds,
                       a.completed_at, q.title as quiz_title
                FROM student_quiz_attempts a
                LEFT JOIN quizzes q ON a.quiz_id = q.id
@@ -3173,6 +3235,8 @@ def get_student_report(user_id: int):
         recent_attempts = []
         for r in recent:
             recent_attempts.append({
+                "id": r["id"],
+                "quiz_id": r["quiz_id"],
                 "quiz_title": r["quiz_title"] or "Quiz",
                 "score": r["score"],
                 "total": r["total_questions"],
@@ -3188,7 +3252,7 @@ def get_student_report(user_id: int):
         return {
             "user_id": user_id,
             "total_stars": int(overall["total_stars"]),
-            "overall_accuracy": round(float(overall["overall_accuracy"]), 1),
+            "overall_accuracy": overall_acc,
             "total_time_spent_seconds": int(time_row["total_time"]),
             "quizzes_completed": int(overall["quizzes_completed"]),
             "topic_breakdown": topic_breakdown,
@@ -3269,7 +3333,8 @@ def get_home_summary(user_id: int):
                     WHEN l.difficulty = 'medium' AND slp.medium_passed THEN l.id
                     WHEN l.difficulty = 'hard' AND slp.hard_passed THEN l.id
                     ELSE NULL 
-                END) AS passed_lessons
+                END) AS passed_lessons,
+                COALESCE(SUM(slp.attempts_count), 0) AS attempts
             FROM lessons l
             JOIN lesson_groups lg ON l.lesson_group_id = lg.id
             LEFT JOIN student_lesson_progress slp ON lg.id = slp.lesson_group_id AND slp.user_id = %s
@@ -3278,11 +3343,13 @@ def get_home_summary(user_id: int):
         """, (user_id,))
         progress_rows = cur.fetchall()
         progress_by_topic = {}
+        attempts_by_topic = {}
         for r in progress_rows:
             tot = r["total_lessons"] or 0
             passed = r["passed_lessons"] or 0
             pct = round((passed / tot * 100), 1) if tot > 0 else 0.0
             progress_by_topic[r["topic_id"]] = pct
+            attempts_by_topic[r["topic_id"]] = int(r["attempts"] or 0)
 
         cur.execute("SELECT * FROM student_profiles WHERE user_id = %s", (user_id,))
         profiles = cur.fetchall()
@@ -3294,12 +3361,14 @@ def get_home_summary(user_id: int):
         for tid in all_topic_ids:
             pct = progress_by_topic.get(tid, 0.0)
             stars = stars_by_topic.get(tid, 0)
+            attempts = attempts_by_topic.get(tid, 0)
             entry = {
                 "topic_id": tid,
                 "stars_earned": stars,
                 "progress_pct": int(pct),
                 "progress": int(pct),
-                "stars": stars
+                "stars": stars,
+                "attempts": attempts,
             }
             topics_list.append(entry)
             topics_map[tid] = entry
@@ -4530,181 +4599,75 @@ def get_translation_status():
         "cached_memory_entries": len(_TRANSLATION_MEMORY_CACHE),
     }
 
-@app.post("/translate/mbart/load")
-def trigger_load_mbart():
-    global model, tokenizer, model_loading
-    if model is not None and tokenizer is not None:
-        return {"status": "already_loaded", "message": "mBART-50 LoRA is already loaded and ready."}
-    if model_loading:
-        return {"status": "loading", "message": "mBART-50 LoRA is currently loading in the background."}
-    threading.Thread(target=_load_mbart_model, daemon=True).start()
-    return {"status": "started", "message": "Triggered background loading of mBART-50 LoRA."}
-
-class CompareRequest(BaseModel):
-    text: str
-    direction: str = "en_to_asl"
-
-@app.post("/translate/test-compare")
-def test_compare_translation(req: CompareRequest):
-    req_text = (req.text or "").strip()
-    if not req_text:
-        return {"error": "Empty text"}
-    
-    # 1. Linguistic Rule Engine
-    t_rule_0 = time.time()
-    rule_res = rule_based_asl_gloss(req_text) if req.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
-    rule_ms = round((time.time() - t_rule_0) * 1000, 2)
-
-    # 2. Neural mBART-50 LoRA Engine
-    neural_res = None
-    neural_ms = 0
-    neural_loaded = (model is not None and tokenizer is not None)
-    if not neural_loaded and not model_loading:
-        _load_mbart_model()
-        neural_loaded = (model is not None and tokenizer is not None)
-
-    if neural_loaded:
-        t_neural_0 = time.time()
-        try:
-            import torch
-            with torch.inference_mode():
-                if req.direction == "en_to_asl":
-                    tokenizer.src_lang = "en_XX"
-                    inputs = tokenizer(req_text, return_tensors="pt", max_length=128, truncation=True)
-                    out = model.generate(
-                        **inputs,
-                        forced_bos_token_id=tokenizer.convert_tokens_to_ids("asl_GL"),
-                        max_new_tokens=64,
-                        num_beams=1
-                    )
-                    neural_res = tokenizer.decode(out[0], skip_special_tokens=True)
-                else:
-                    tokenizer.src_lang = "asl_GL"
-                    inputs = tokenizer(req_text, return_tensors="pt", max_length=128, truncation=True)
-                    out = model.generate(
-                        **inputs,
-                        forced_bos_token_id=tokenizer.convert_tokens_to_ids("en_XX"),
-                        max_new_tokens=64,
-                        num_beams=1
-                    )
-                    neural_res = tokenizer.decode(out[0], skip_special_tokens=True)
-            neural_ms = round((time.time() - t_neural_0) * 1000, 1)
-        except Exception as e:
-            neural_res = f"Error during generation: {e}"
-
-    return {
-        "input": req_text,
-        "direction": req.direction,
-        "linguistic_rule": {
-            "result": rule_res,
-            "latency_ms": rule_ms
-        },
-        "neural_mbart": {
-            "result": neural_res,
-            "latency_ms": neural_ms,
-            "loaded": neural_loaded
-        }
-    }
-
 
 @app.post("/translate")
 def translate_text(request: TranslationRequest):
     req_text = (request.text or "").strip()
     if not req_text:
-        return {"result": "", "direction": request.direction, "engine": "none"}
+        return {"result": "", "direction": request.direction}
 
     t_start = time.time()
-    force_eng = (request.force_engine or "").lower().strip()
+    cache_key = (req_text.lower(), request.direction)
 
-    # If force_engine == "rule", directly run linguistic grammar engine
-    if force_eng == "rule":
-        text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
-        elapsed_ms = round((time.time() - t_start) * 1000, 1)
-        return {
-            "result": text_res,
-            "direction": request.direction,
-            "engine": "linguistic-rule",
-            "latency_ms": elapsed_ms,
-            "neural": False
-        }
+    # 1. Check in-memory LRU cache (<0.001s instant response)
+    with _TRANSLATION_LOCK:
+        if cache_key in _TRANSLATION_MEMORY_CACHE:
+            elapsed_ms = round((time.time() - t_start) * 1000, 1)
+            return {
+                "result": _TRANSLATION_MEMORY_CACHE[cache_key],
+                "direction": request.direction,
+                "cached": True,
+                "latency_ms": elapsed_ms
+            }
 
-    # If force_engine == "neural", force neural loading and inference (bypass cache)
-    if force_eng == "neural":
-        if not tokenizer or not model:
-            if not model_loading:
-                _load_mbart_model()
-            if not tokenizer or not model:
-                text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
-                elapsed_ms = round((time.time() - t_start) * 1000, 1)
-                return {
-                    "result": text_res,
-                    "direction": request.direction,
-                    "engine": "linguistic-rule (neural loading)",
-                    "latency_ms": elapsed_ms,
-                    "note": "mBART model is still loading weights into memory. Please retry in 10-20 seconds.",
-                    "neural": False
-                }
+    # 2. Check persistent PostgreSQL translations_cache (case-insensitive, <0.02s)
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT translated_text FROM translations_cache 
+               WHERE (source_text = %s OR LOWER(source_text) = LOWER(%s)) AND direction = %s 
+               ORDER BY (source_text = %s) DESC LIMIT 1""",
+            (req_text, req_text, request.direction, req_text)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row.get("translated_text"):
+            cached_result = row["translated_text"]
+            with _TRANSLATION_LOCK:
+                if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
+                    _TRANSLATION_MEMORY_CACHE.clear()
+                _TRANSLATION_MEMORY_CACHE[cache_key] = cached_result
+            elapsed_ms = round((time.time() - t_start) * 1000, 1)
+            return {
+                "result": cached_result,
+                "direction": request.direction,
+                "cached": True,
+                "latency_ms": elapsed_ms
+            }
+    except Exception:
+        pass
 
-    # Standard Cache Lookup (only when not forcing neural)
-    if force_eng != "neural":
-        cache_key = (req_text, request.direction)
-        with _TRANSLATION_LOCK:
-            if cache_key in _TRANSLATION_MEMORY_CACHE:
-                elapsed_ms = round((time.time() - t_start) * 1000, 1)
-                return {
-                    "result": _TRANSLATION_MEMORY_CACHE[cache_key],
-                    "direction": request.direction,
-                    "cached": True,
-                    "engine": "cache",
-                    "latency_ms": elapsed_ms
-                }
-
-        try:
-            conn = get_db()
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute(
-                "SELECT translated_text FROM translations_cache WHERE source_text = %s AND direction = %s LIMIT 1",
-                (req_text, request.direction)
-            )
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-            if row and row.get("translated_text"):
-                cached_result = row["translated_text"]
-                with _TRANSLATION_LOCK:
-                    if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
-                        _TRANSLATION_MEMORY_CACHE.clear()
-                    _TRANSLATION_MEMORY_CACHE[cache_key] = cached_result
-                elapsed_ms = round((time.time() - t_start) * 1000, 1)
-                return {
-                    "result": cached_result,
-                    "direction": request.direction,
-                    "cached": True,
-                    "engine": "cache",
-                    "latency_ms": elapsed_ms
-                }
-        except Exception:
-            pass
-
-    # Fallback to linguistic rule engine if model is not loaded
+    # 3. Ensure mBART-50 LoRA model is loading/loaded
     if not tokenizer or not model:
         if not model_loading and os.getenv("ENABLE_NEURAL_MBART", "0") == "1":
-            threading.Thread(target=_load_mbart_model, daemon=True).start()
+            _load_mbart_model()
+
+    # If neural model is not available or still loading, fallback to linguistic rule engine
+    if not tokenizer or not model:
         text_res = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
         elapsed_ms = round((time.time() - t_start) * 1000, 1)
         return {
             "result": text_res,
             "direction": request.direction,
             "fallback": True,
-            "engine": "linguistic-rule",
-            "latency_ms": elapsed_ms,
-            "neural": False
+            "latency_ms": elapsed_ms
         }
 
-    # Neural generation under torch.inference_mode()
+    # 4. Neural generation with mBART-50 LoRA
     import torch
     max_tokens = 32 if len(req_text.split()) <= 15 else 64
-    active_engine = "mbart-50-lora"
 
     try:
         with torch.inference_mode():
@@ -4743,23 +4706,21 @@ def translate_text(request: TranslationRequest):
     except Exception as gen_err:
         print(f"[Translation] Neural generation fallback: {gen_err}")
         result = rule_based_asl_gloss(req_text) if request.direction == "en_to_asl" else rule_based_asl_to_english(req_text)
-        active_engine = "linguistic-rule (fallback)"
 
-    # Populate in-memory cache
-    cache_key = (req_text, request.direction)
+    # 5. Populate in-memory cache
     with _TRANSLATION_LOCK:
         if len(_TRANSLATION_MEMORY_CACHE) >= _MAX_TRANSLATION_CACHE:
             _TRANSLATION_MEMORY_CACHE.clear()
         _TRANSLATION_MEMORY_CACHE[cache_key] = result
 
-    # Asynchronously persist to database cache
+    # 6. Asynchronously persist to database cache
     def _persist_cache_async(s_text, s_dir, t_res):
         try:
             p_conn = get_db()
             p_cur = p_conn.cursor()
             p_cur.execute(
                 """INSERT INTO translations_cache (source_text, direction, translated_text, model_version)
-                   VALUES (%s, %s, %s, 'mbart_int8_v1')
+                   VALUES (%s, %s, %s, 'mbart_50_lora')
                    ON CONFLICT (source_text, direction, model_version) DO NOTHING""",
                 (s_text, s_dir, t_res)
             )
@@ -4775,9 +4736,8 @@ def translate_text(request: TranslationRequest):
     return {
         "result": result,
         "direction": request.direction,
-        "engine": active_engine,
-        "latency_ms": elapsed_ms,
-        "neural": (active_engine == "mbart-50-lora")
+        "cached": False,
+        "latency_ms": elapsed_ms
     }
 
 
@@ -5248,6 +5208,7 @@ def get_student_quiz_attempts(user_id: int):
     """
     Returns full chronological history of a student's quiz attempts
     with quiz title, topic, difficulty, score, total questions, accuracy, passed, and timestamps.
+    Enhancement 2: Includes first-try vs repeat-try tracking.
     """
     try:
         conn = get_db()
@@ -5275,8 +5236,26 @@ def get_student_quiz_attempts(user_id: int):
         cur.close()
         conn.close()
 
+        # Calculate chronological try number per quiz
+        quiz_tries = {}
+        for r in reversed(rows):
+            qid = r["quiz_id"]
+            if qid not in quiz_tries:
+                quiz_tries[qid] = []
+            quiz_tries[qid].append(r["attempt_id"])
+
+        attempt_try_map = {}
+        for qid, att_ids in quiz_tries.items():
+            for idx, aid in enumerate(att_ids):
+                attempt_try_map[aid] = {
+                    "try_number": idx + 1,
+                    "total_tries": len(att_ids),
+                    "is_first_try": idx == 0,
+                }
+
         attempts = []
         for r in rows:
+            t_info = attempt_try_map.get(r["attempt_id"], {"try_number": 1, "total_tries": 1, "is_first_try": True})
             attempts.append({
                 "attempt_id": r["attempt_id"],
                 "quiz_id": r["quiz_id"],
@@ -5290,13 +5269,20 @@ def get_student_quiz_attempts(user_id: int):
                 "time_spent_seconds": r["time_spent_seconds"] or 0,
                 "completed_at": str(r["completed_at"]) if r["completed_at"] else None,
                 "started_at": str(r["started_at"]) if r["started_at"] else None,
+                "try_number": t_info["try_number"],
+                "total_tries": t_info["total_tries"],
+                "is_first_try": t_info["is_first_try"],
             })
+
+        first_tries = [a["accuracy_pct"] for a in attempts if a["is_first_try"]]
+        mean_first_try = round(sum(first_tries) / len(first_tries), 1) if first_tries else 0.0
 
         return {
             "user_id": user_id,
             "total_attempts": len(attempts),
             "passed_count": sum(1 for a in attempts if a["passed"]),
             "failed_count": sum(1 for a in attempts if not a["passed"]),
+            "mean_first_try_accuracy": mean_first_try,
             "attempts": attempts
         }
     except Exception as e:

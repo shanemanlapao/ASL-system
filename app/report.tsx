@@ -56,6 +56,9 @@ interface GroupedQuizAttempt {
   difficulty: string;
   attempts: RecentAttempt[];
   totalTries: number;
+  firstScore: number;
+  firstTotal: number;
+  firstAccuracy: number;
   bestScore: number;
   bestTotal: number;
   bestAccuracy: number;
@@ -134,6 +137,9 @@ export default function ReportScreen() {
           difficulty: ra.difficulty,
           attempts: [],
           totalTries: 0,
+          firstScore: ra.score,
+          firstTotal: ra.total,
+          firstAccuracy: ra.accuracy,
           bestScore: ra.score,
           bestTotal: ra.total,
           bestAccuracy: ra.accuracy,
@@ -151,6 +157,28 @@ export default function ReportScreen() {
         map[key].bestTotal = ra.total;
       }
     }
+
+    // Sort each group's attempts chronologically ascending to pinpoint initial try vs peak try
+    Object.values(map).forEach((group) => {
+      group.attempts.sort((a, b) => {
+        const tA = a.completed_at ? new Date(a.completed_at).getTime() : 0;
+        const tB = b.completed_at ? new Date(b.completed_at).getTime() : 0;
+        return tA - tB;
+      });
+      const first = group.attempts[0];
+      const latest = group.attempts[group.attempts.length - 1];
+      if (first) {
+        group.firstScore = first.score;
+        group.firstTotal = first.total;
+        group.firstAccuracy = first.accuracy;
+      }
+      if (latest) {
+        group.latestScore = latest.score;
+        group.latestTotal = latest.total;
+        group.latestAccuracy = latest.accuracy;
+        group.latestTimeSeconds = latest.time_spent_seconds;
+      }
+    });
 
     return Object.values(map);
   }, [report?.recent_attempts]);
@@ -364,6 +392,16 @@ export default function ReportScreen() {
                               {group.totalTries} {group.totalTries === 1 ? "Try" : "Tries"}
                             </Text>
                           </View>
+
+                          {/* First Try Comparison Badge (if repeated) */}
+                          {group.totalTries > 1 && (
+                            <View style={[styles.triesPill, { backgroundColor: '#F8FAFC', borderColor: '#CBD5E1' }]}>
+                              <Ionicons name="flag-outline" size={11} color="#64748B" />
+                              <Text style={[styles.triesPillText, { color: '#475569' }]}>
+                                1st: {group.firstAccuracy}%
+                              </Text>
+                            </View>
+                          )}
                         </View>
                       </View>
 
@@ -406,10 +444,12 @@ export default function ReportScreen() {
                           <Text style={styles.expandedHeaderSubtitle}>Newest First</Text>
                         </View>
 
-                        {group.attempts.map((att, attIdx) => {
+                        {[...group.attempts].reverse().map((att, attIdx) => {
                           const tryNumber = group.attempts.length - attIdx;
                           const attPassed = att.accuracy >= 70;
                           const isLatest = attIdx === 0;
+                          const isFirst = tryNumber === 1;
+                          const isPeak = att.accuracy === group.bestAccuracy;
 
                           return (
                             <View
@@ -431,6 +471,16 @@ export default function ReportScreen() {
                                     {isLatest && (
                                       <View style={styles.latestPill}>
                                         <Text style={styles.latestPillText}>Latest</Text>
+                                      </View>
+                                    )}
+                                    {isFirst && group.totalTries > 1 && (
+                                      <View style={[styles.latestPill, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]}>
+                                        <Text style={[styles.latestPillText, { color: '#475569' }]}>Initial</Text>
+                                      </View>
+                                    )}
+                                    {isPeak && (
+                                      <View style={[styles.latestPill, { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' }]}>
+                                        <Text style={[styles.latestPillText, { color: '#B45309' }]}>Peak</Text>
                                       </View>
                                     )}
                                   </View>

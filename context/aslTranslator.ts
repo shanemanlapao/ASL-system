@@ -76,7 +76,6 @@ const IRREGULAR_ASL_VERBS: Record<string, { base: string; isPast: boolean }> = {
   baking: { base: 'BAKE', isPast: false },
   liked: { base: 'LIKE', isPast: true },
   loved: { base: 'LOVE', isPast: true },
-  placed: { base: 'PLACE', isPast: true },
   saved: { base: 'SAVE', isPast: true },
   smiled: { base: 'SMILE', isPast: true },
   lived: { base: 'LIVE', isPast: true },

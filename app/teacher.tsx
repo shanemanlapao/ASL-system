@@ -2613,9 +2613,18 @@ export default function TeacherDashboardScreen() {
                               <View style={styles.attemptCardTop}>
                                 <View style={{ flex: 1, marginRight: 8 }}>
                                   <Text style={styles.attemptQuizTitle}>{attempt.quiz_title || 'Untitled Quiz'}</Text>
-                                  <Text style={styles.attemptTopicText}>
-                                    Topic: {attempt.topic_id || 'General'}
-                                  </Text>
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2, flexWrap: 'wrap' }}>
+                                    <Text style={styles.attemptTopicText}>
+                                      Topic: {attempt.topic_id || 'General'}
+                                    </Text>
+                                    {attempt.total_tries > 1 && (
+                                      <View style={{ backgroundColor: attempt.is_first_try ? '#EEF2FF' : '#F1F5F9', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: attempt.is_first_try ? '#C7D2FE' : '#E2E8F0' }}>
+                                        <Text style={{ fontSize: 10, fontWeight: '700', color: attempt.is_first_try ? '#4338CA' : '#64748B' }}>
+                                          {attempt.is_first_try ? 'Try #1 (Initial)' : `Try #${attempt.try_number} of ${attempt.total_tries}`}
+                                        </Text>
+                                      </View>
+                                    )}
+                                  </View>
                                 </View>
 
                                 <View style={[styles.diffBadge, { backgroundColor: diffBg, borderColor: diffColor }]}>
