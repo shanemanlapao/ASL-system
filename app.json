@@ -2,14 +2,14 @@
   "expo": {
     "name": "BrightPath",
     "slug": "brightpath",
-    "version": "1.2.4",
+    "version": "1.2.5",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "brightpath",
     "userInterfaceStyle": "automatic",
     "android": {
       "package": "com.wvsu.aslsystem",
-      "versionCode": 5,
+      "versionCode": 6,
       "adaptiveIcon": {
         "backgroundColor": "#F8FAFC",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
