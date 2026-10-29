@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useAuth } from '../context/AuthContext';
 import { API_URL } from '../context/config';
 import Confetti from '../components/Confetti';
@@ -27,6 +27,8 @@ interface DailySlot {
   stars_earned: number | null;
   can_refresh: boolean;
   refresh_used: boolean;
+  is_locked?: boolean;
+  lock_reason?: string;
 }
 
 interface DailyQuizResponse {
@@ -68,14 +70,57 @@ export default function DailyQuizScreen() {
   const [refreshingSlot, setRefreshingSlot] = useState<string | null>(null);
   const [timeUntilMidnight, setTimeUntilMidnight] = useState<string>('');
 
+  const getLocalDateString = useCallback(() => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }, []);
+
+  // -- Fetch helpers ----------------------------------------------------------
+
+  const fetchSlots = useCallback(async () => {
+    try {
+      const todayStr = getLocalDateString();
+      const res = await fetch(`${API_URL}/daily-quizzes/${userId}?client_date=${todayStr}`);
+      if (res.ok) {
+        const data: DailyQuizResponse = await res.json();
+        setSlots(data.slots ?? []);
+        setFullClear(data.full_clear_achieved ?? false);
+        setCompletedCount(data.completed_count ?? 0);
+      }
+    } catch { /* silent */ }
+  }, [userId, getLocalDateString]);
+
+  const fetchStreak = useCallback(async () => {
+    try {
+      const todayStr = getLocalDateString();
+      const res = await fetch(`${API_URL}/student/${userId}/streak?client_date=${todayStr}`);
+      if (res.ok) {
+        setStreak(await res.json());
+      }
+    } catch { /* silent */ }
+  }, [userId, getLocalDateString]);
+
+  // Midnight countdown timer with dynamic date rollover detection
   useEffect(() => {
+    let lastDate = getLocalDateString();
     const updateCountdown = () => {
       const now = new Date();
+      const currentDate = getLocalDateString();
+      if (currentDate !== lastDate) {
+        lastDate = currentDate;
+        fetchSlots();
+        fetchStreak();
+      }
       const midnight = new Date();
       midnight.setHours(24, 0, 0, 0);
       const diffMs = midnight.getTime() - now.getTime();
       if (diffMs <= 0) {
         setTimeUntilMidnight('00:00:00');
+        fetchSlots();
+        fetchStreak();
         return;
       }
       const h = Math.floor(diffMs / (1000 * 60 * 60));
@@ -88,7 +133,7 @@ export default function DailyQuizScreen() {
     updateCountdown();
     const interval = setInterval(updateCountdown, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [getLocalDateString, fetchSlots, fetchStreak]);
 
   // Subtle Flame Flicker / Pulse for active study streak
   const flameAnim = useRef(new Animated.Value(1)).current;
@@ -122,29 +167,6 @@ export default function DailyQuizScreen() {
     return () => flameLoop.stop();
   }, [flameAnim]);
 
-  // -- Fetch helpers ----------------------------------------------------------
-
-  const fetchSlots = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_URL}/daily-quizzes/${userId}`);
-      if (res.ok) {
-        const data: DailyQuizResponse = await res.json();
-        setSlots(data.slots ?? []);
-        setFullClear(data.full_clear_achieved ?? false);
-        setCompletedCount(data.completed_count ?? 0);
-      }
-    } catch { /* silent */ }
-  }, [userId]);
-
-  const fetchStreak = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_URL}/student/${userId}/streak`);
-      if (res.ok) {
-        setStreak(await res.json());
-      }
-    } catch { /* silent */ }
-  }, [userId]);
-
   useEffect(() => {
     const load = async () => {
       setLoading(true);
@@ -153,6 +175,13 @@ export default function DailyQuizScreen() {
     };
     load();
   }, [fetchSlots, fetchStreak]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchSlots();
+      fetchStreak();
+    }, [fetchSlots, fetchStreak])
+  );
 
   // -- Actions ----------------------------------------------------------------
 
@@ -172,13 +201,18 @@ export default function DailyQuizScreen() {
   };
 
   const handleRefreshSlot = async (slot: DailySlot) => {
-    if (refreshingSlot) return;
+    if (refreshingSlot || slot.is_locked) return;
     setRefreshingSlot(slot.slot_difficulty);
     try {
+      const todayStr = getLocalDateString();
       const res = await fetch(`${API_URL}/daily-quizzes/${userId}/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slot_difficulty: slot.slot_difficulty, topic_id: null }),
+        body: JSON.stringify({
+          slot_difficulty: slot.slot_difficulty,
+          topic_id: null,
+          client_date: todayStr,
+        }),
       });
       if (res.ok) {
         await fetchSlots();
@@ -319,7 +353,9 @@ export default function DailyQuizScreen() {
 
                   {/* Quiz title */}
                   <Text style={styles.quizTitle} numberOfLines={2}>
-                    {slot.quiz_title ?? (slot.quiz_id === null ? 'No quiz assigned' : `Quiz #${slot.quiz_id}`)}
+                    {slot.is_locked
+                      ? (slot.lock_reason || 'Tier locked in curriculum')
+                      : (slot.quiz_title ?? (slot.quiz_id === null ? 'No quiz available' : `Quiz #${slot.quiz_id}`))}
                   </Text>
 
                   {/* State section */}
@@ -333,6 +369,13 @@ export default function DailyQuizScreen() {
                           <Text style={styles.starsEarnedText}>+{slot.stars_earned}</Text>
                         </View>
                       )}
+                    </View>
+                  ) : slot.is_locked ? (
+                    <View style={[styles.lockedRow, { backgroundColor: '#F8FAFC', padding: 10, borderRadius: 10, borderWidth: 1, borderColor: '#E2E8F0' }]}>
+                      <Ionicons name="lock-closed" size={17} color="#64748B" style={{ marginRight: 8 }} />
+                      <Text style={[styles.lockedText, { color: '#64748B', fontWeight: '600', fontStyle: 'normal' }]}>
+                        {slot.lock_reason || 'Locked in curriculum'}
+                      </Text>
                     </View>
                   ) : slot.quiz_id === null ? (
                     <View style={styles.lockedRow}>

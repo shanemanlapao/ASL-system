@@ -670,7 +670,9 @@ export default function QuizScreen() {
           if (mode === 'daily') {
             try {
               const diff = (slot_difficulty as string) || (difficulty as string) || 'easy';
-              await fetch(`${API_URL}/daily-quizzes/${userId}/complete`, {
+              const d = new Date();
+              const todayStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+              const cRes = await fetch(`${API_URL}/daily-quizzes/${userId}/complete`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -679,8 +681,15 @@ export default function QuizScreen() {
                   total_questions: totalQ,
                   time_spent_seconds: totalTimeSec,
                   topic_id: (subjectId as string) || null,
+                  client_date: todayStr,
                 }),
               });
+              if (cRes.ok) {
+                const cData = await cRes.json();
+                if (cData.stars_earned && cData.stars_earned > 0) {
+                  await addLocalStars(userId, cData.stars_earned);
+                }
+              }
             } catch (dErr) {
               console.log('Daily slot complete error:', dErr);
             }

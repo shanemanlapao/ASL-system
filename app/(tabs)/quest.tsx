@@ -32,6 +32,8 @@ interface DailySlot {
   quiz_title: string | null;
   completed: boolean;
   stars_earned: number | null;
+  is_locked?: boolean;
+  lock_reason?: string;
 }
 
 interface DailyQuizResponse {
@@ -214,6 +216,11 @@ export default function QuestTabScreen() {
       const currentDate = getLocalDateString();
       if (currentDate !== lastDate) {
         lastDate = currentDate;
+        // Clean up in-memory daily counters for the fresh day
+        setStoryReadDone(false);
+        setFlashcardsDoneCount(0);
+        setClaimedMissions({});
+        setDailyQuiz(null);
         loadData();
       }
       const midnight = new Date();
@@ -221,6 +228,10 @@ export default function QuestTabScreen() {
       const diffMs = midnight.getTime() - now.getTime();
       if (diffMs <= 0) {
         setTimeUntilMidnight('00:00:00');
+        setStoryReadDone(false);
+        setFlashcardsDoneCount(0);
+        setClaimedMissions({});
+        setDailyQuiz(null);
         loadData();
         return;
       }
@@ -641,42 +652,90 @@ export default function QuestTabScreen() {
               {/* Easy */}
               <View style={[
                 styles.slotPill,
-                dailyQuiz?.slots?.[0]?.completed ? styles.slotPillDone : styles.slotPillPending
+                dailyQuiz?.slots?.[0]?.completed
+                  ? styles.slotPillDone
+                  : dailyQuiz?.slots?.[0]?.is_locked
+                  ? [styles.slotPillPending, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]
+                  : styles.slotPillPending
               ]}>
                 <Text style={styles.slotPillLabel}>Easy</Text>
                 <Text style={styles.slotPillReward}>+10★</Text>
                 <Ionicons
-                  name={dailyQuiz?.slots?.[0]?.completed ? 'checkmark-circle' : 'time-outline'}
+                  name={
+                    dailyQuiz?.slots?.[0]?.completed
+                      ? 'checkmark-circle'
+                      : dailyQuiz?.slots?.[0]?.is_locked
+                      ? 'lock-closed'
+                      : 'time-outline'
+                  }
                   size={14}
-                  color={dailyQuiz?.slots?.[0]?.completed ? COLORS.success : COLORS.textSecondary}
+                  color={
+                    dailyQuiz?.slots?.[0]?.completed
+                      ? COLORS.success
+                      : dailyQuiz?.slots?.[0]?.is_locked
+                      ? '#94A3B8'
+                      : COLORS.textSecondary
+                  }
                 />
               </View>
 
               {/* Medium */}
               <View style={[
                 styles.slotPill,
-                dailyQuiz?.slots?.[1]?.completed ? styles.slotPillDone : styles.slotPillPending
+                dailyQuiz?.slots?.[1]?.completed
+                  ? styles.slotPillDone
+                  : dailyQuiz?.slots?.[1]?.is_locked
+                  ? [styles.slotPillPending, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]
+                  : styles.slotPillPending
               ]}>
                 <Text style={styles.slotPillLabel}>Medium</Text>
                 <Text style={styles.slotPillReward}>+20★</Text>
                 <Ionicons
-                  name={dailyQuiz?.slots?.[1]?.completed ? 'checkmark-circle' : 'time-outline'}
+                  name={
+                    dailyQuiz?.slots?.[1]?.completed
+                      ? 'checkmark-circle'
+                      : dailyQuiz?.slots?.[1]?.is_locked
+                      ? 'lock-closed'
+                      : 'time-outline'
+                  }
                   size={14}
-                  color={dailyQuiz?.slots?.[1]?.completed ? COLORS.success : COLORS.textSecondary}
+                  color={
+                    dailyQuiz?.slots?.[1]?.completed
+                      ? COLORS.success
+                      : dailyQuiz?.slots?.[1]?.is_locked
+                      ? '#94A3B8'
+                      : COLORS.textSecondary
+                  }
                 />
               </View>
 
               {/* Hard */}
               <View style={[
                 styles.slotPill,
-                dailyQuiz?.slots?.[2]?.completed ? styles.slotPillDone : styles.slotPillPending
+                dailyQuiz?.slots?.[2]?.completed
+                  ? styles.slotPillDone
+                  : dailyQuiz?.slots?.[2]?.is_locked
+                  ? [styles.slotPillPending, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]
+                  : styles.slotPillPending
               ]}>
                 <Text style={styles.slotPillLabel}>Hard</Text>
                 <Text style={styles.slotPillReward}>+30★</Text>
                 <Ionicons
-                  name={dailyQuiz?.slots?.[2]?.completed ? 'checkmark-circle' : 'time-outline'}
+                  name={
+                    dailyQuiz?.slots?.[2]?.completed
+                      ? 'checkmark-circle'
+                      : dailyQuiz?.slots?.[2]?.is_locked
+                      ? 'lock-closed'
+                      : 'time-outline'
+                  }
                   size={14}
-                  color={dailyQuiz?.slots?.[2]?.completed ? COLORS.success : COLORS.textSecondary}
+                  color={
+                    dailyQuiz?.slots?.[2]?.completed
+                      ? COLORS.success
+                      : dailyQuiz?.slots?.[2]?.is_locked
+                      ? '#94A3B8'
+                      : COLORS.textSecondary
+                  }
                 />
               </View>
             </View>

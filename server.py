@@ -685,14 +685,14 @@ threading.Thread(target=init_db, daemon=True).start()
 
 from datetime import date, timedelta
 
-def _update_student_streak(cur, user_id: int):
+def _update_student_streak(cur, user_id: int, activity_date: Optional[date] = None):
     """
     Called after every quiz completion.
     - If last activity was yesterday  → current_streak += 1
     - If last activity was today      → no change (already counted)
     - If last activity was older      → reset to 1, save pre_break_streak for repair
     """
-    today = date.today()
+    today = activity_date if activity_date else date.today()
     cur.execute(
         "SELECT * FROM student_streaks WHERE user_id = %s",
         (user_id,)
@@ -2047,6 +2047,11 @@ def delete_lesson_group(group_id: int, teacher_name: str = "Teacher", teacher_id
                WHERE lesson_id IN (SELECT id FROM lessons WHERE lesson_group_id = %s)""",
             (teacher_name, group_id)
         )
+        cur.execute(
+            """UPDATE daily_quiz_slots 
+               SET quiz_id = NULL 
+               WHERE quiz_id IN (SELECT id FROM quizzes WHERE is_deleted = TRUE) AND completed = FALSE"""
+        )
         conn.commit()
         cur.close()
         conn.close()
@@ -2082,6 +2087,11 @@ def delete_lesson(lesson_id: int, teacher_name: str = "Teacher", teacher_id: Opt
         
         cur.execute("UPDATE lessons SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE id = %s", (teacher_name, lesson_id))
         cur.execute("UPDATE quizzes SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE lesson_id = %s", (teacher_name, lesson_id))
+        cur.execute(
+            """UPDATE daily_quiz_slots 
+               SET quiz_id = NULL 
+               WHERE quiz_id IN (SELECT id FROM quizzes WHERE is_deleted = TRUE) AND completed = FALSE"""
+        )
         conn.commit()
         cur.close()
         conn.close()
@@ -3878,7 +3888,7 @@ def fit_bkt_model(topic_id: Optional[str] = None):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/student/{user_id}/streak")
-def get_streak(user_id: int):
+def get_streak(user_id: int, client_date: Optional[str] = None):
     """Returns current streak, longest streak, burnout status, repair eligibility and total stars."""
     try:
         conn = get_db()
@@ -3889,6 +3899,11 @@ def get_streak(user_id: int):
         cur.close()
         conn.close()
         today = date.today()
+        if client_date:
+            try:
+                today = datetime.strptime(client_date, "%Y-%m-%d").date()
+            except Exception:
+                today = date.today()
         if not row:
             return {
                 "user_id": user_id, "current_streak": 0, "longest_streak": 0,
@@ -3991,17 +4006,18 @@ def get_daily_missions(user_id: int, client_date: Optional[str] = None):
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         target_date = client_date if client_date else str(date.today())
+        # Strictly query target_date so claims from previous days never bleed into the new day!
         cur.execute(
-            "SELECT mission_id, claimed, stars_earned FROM student_daily_missions WHERE user_id = %s AND (mission_date = %s OR mission_date = %s)",
-            (user_id, target_date, date.today())
+            "SELECT mission_id, claimed, stars_earned FROM student_daily_missions WHERE user_id = %s AND mission_date = %s",
+            (user_id, target_date)
         )
         rows = cur.fetchall()
         claimed = {r["mission_id"]: True for r in rows if r["claimed"]}
 
         # Check daily quizzes done today
         cur.execute(
-            "SELECT COUNT(*) as cnt FROM daily_quiz_slots WHERE user_id = %s AND (slot_date = %s OR slot_date = %s) AND completed = TRUE",
-            (user_id, target_date, date.today())
+            "SELECT COUNT(*) as cnt FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND completed = TRUE",
+            (user_id, target_date)
         )
         q_row = cur.fetchone()
         daily_quizzes_done = q_row["cnt"] if q_row else 0
@@ -4009,8 +4025,8 @@ def get_daily_missions(user_id: int, client_date: Optional[str] = None):
         # Check story lessons / quizzes completed today
         cur.execute(
             """SELECT COUNT(*) as cnt FROM student_quiz_attempts 
-               WHERE user_id = %s AND (DATE(started_at) = %s OR DATE(started_at) = %s) AND completed_at IS NOT NULL""",
-            (user_id, target_date, date.today())
+               WHERE user_id = %s AND DATE(started_at) = %s AND completed_at IS NOT NULL""",
+            (user_id, target_date)
         )
         s_row = cur.fetchone()
         story_done = s_row["cnt"] if s_row else 0
@@ -4047,12 +4063,12 @@ def claim_daily_mission(user_id: int, req: MissionClaimRequest):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = req.client_date if req.client_date else date.today()
+        today = req.client_date if req.client_date else str(date.today())
         
-        # Check if already claimed today (checks client date and server date for timezone tolerance)
+        # Check if already claimed today for this target date
         cur.execute(
-            "SELECT * FROM student_daily_missions WHERE user_id = %s AND (mission_date = %s OR mission_date = %s) AND mission_id = %s",
-            (user_id, today, date.today(), req.mission_id)
+            "SELECT * FROM student_daily_missions WHERE user_id = %s AND mission_date = %s AND mission_id = %s",
+            (user_id, today, req.mission_id)
         )
         existing = cur.fetchone()
         if existing and existing["claimed"]:
@@ -4071,14 +4087,14 @@ def claim_daily_mission(user_id: int, req: MissionClaimRequest):
         # Server-side mission completion verification
         if req.mission_id == "quiz":
             cur.execute(
-                "SELECT COUNT(*) as cnt FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND completed = TRUE",
-                (user_id, today)
+                "SELECT COUNT(*) as cnt FROM daily_quiz_slots WHERE user_id = %s AND (slot_date = %s OR slot_date = %s) AND completed = TRUE",
+                (user_id, today, date.today())
             )
             quiz_done = cur.fetchone()["cnt"]
             if quiz_done == 0:
                 cur.execute(
-                    "SELECT COUNT(*) as cnt FROM student_quiz_attempts WHERE user_id = %s AND DATE(created_at) = %s AND score >= 1",
-                    (user_id, today)
+                    "SELECT COUNT(*) as cnt FROM student_quiz_attempts WHERE user_id = %s AND (DATE(started_at) = %s OR DATE(started_at) = %s) AND score >= 1 AND completed_at IS NOT NULL",
+                    (user_id, today, date.today())
                 )
                 quiz_done = cur.fetchone()["cnt"]
             if quiz_done == 0:
@@ -4087,8 +4103,6 @@ def claim_daily_mission(user_id: int, req: MissionClaimRequest):
                 raise HTTPException(status_code=400, detail="Daily quiz mission requirement not yet met. Please pass at least 1 quiz.")
         elif req.mission_id == "story":
             # Story Explorer mission: Reading story slides qualifies for daily claim.
-            # student_daily_missions table has UNIQUE(user_id, mission_date, mission_id)
-            # which strictly prevents claiming more than once per day.
             pass
 
         # Fixed server-side reward (never trust client-supplied stars)
@@ -4104,7 +4118,7 @@ def claim_daily_mission(user_id: int, req: MissionClaimRequest):
         )
 
         # Permanently award stars into student_profiles
-        _add_stars(cur, user_id, verified_reward)
+        _add_stars(cur, user_id, verified_reward, "daily_mission")
         
         conn.commit()
         total_stars = _get_total_stars(cur, user_id)
@@ -4324,87 +4338,129 @@ DAILY_STAR_REWARDS = {"easy": 10, "medium": 20, "hard": 30}
 DAILY_FULL_CLEAR_BONUS = 25
 DAILY_REFRESH_COST = 5
 
-def _pick_quiz_for_slot(cur, user_id: int, difficulty: str, exclude_quiz_id: int = None):
+def _get_student_unlocked_curriculum(cur, user_id: int):
     """
-    Pick a daily quiz slot for the user.
-    Uses unlocked/taken lessons. Fallback to any quizzes if there are no lesson groups or not enough quizzes.
+    Returns curriculum unlock state for the student based on active lesson groups:
+    - unlocked_group_ids: list of lesson_group_id that the student has reached/unlocked
+    - medium_unlocked_group_ids: list of lesson_group_id where easy_passed is True
+    - hard_unlocked_group_ids: list of lesson_group_id where medium_passed is True
+    - has_unlocked_medium: bool (whether student has unlocked Medium in at least one lesson)
+    - has_unlocked_hard: bool (whether student has unlocked Hard in at least one lesson)
     """
-    # 1. Get lesson groups they have completed/passed or taken
+    # 1. Fetch student's progress across all lesson groups
     cur.execute(
         "SELECT lesson_group_id, easy_passed, medium_passed, hard_passed FROM student_lesson_progress WHERE user_id = %s",
         (user_id,)
     )
     progress_rows = cur.fetchall()
-    taken_groups = [r["lesson_group_id"] for r in progress_rows]
-    easy_passed_groups = [r["lesson_group_id"] for r in progress_rows if r["easy_passed"]]
-    medium_passed_groups = [r["lesson_group_id"] for r in progress_rows if r["medium_passed"]]
-    hard_passed_groups = [r["lesson_group_id"] for r in progress_rows if r["hard_passed"]]
+    prog_map = {r["lesson_group_id"]: r for r in progress_rows}
 
-    # Decide target difficulty based on what they have unlocked.
-    # If they want Hard but have not passed Medium, fallback to Medium.
-    # If they want Medium but have not passed Easy, fallback to Easy.
-    target_difficulty = difficulty
-    if difficulty == "hard" and not medium_passed_groups:
-        target_difficulty = "medium"
-    if target_difficulty == "medium" and not easy_passed_groups:
-        target_difficulty = "easy"
+    # 2. Fetch all active topics and their non-deleted lesson groups
+    cur.execute(
+        "SELECT id, topic_id FROM lesson_groups WHERE COALESCE(is_deleted, FALSE) = FALSE ORDER BY topic_id ASC, order_index ASC, id ASC"
+    )
+    all_groups = cur.fetchall()
 
-    # Decide which lesson groups to target
+    topic_groups = {}
+    for g in all_groups:
+        tid = g["topic_id"]
+        if tid not in topic_groups:
+            topic_groups[tid] = []
+        topic_groups[tid].append(g["id"])
+
+    unlocked_group_ids = []
+    medium_unlocked_group_ids = []
+    hard_unlocked_group_ids = []
+
+    for tid, g_ids in topic_groups.items():
+        for idx, gid in enumerate(g_ids):
+            # Index 0 is always unlocked by default
+            is_unlocked = False
+            if idx == 0:
+                is_unlocked = True
+            else:
+                prev_gid = g_ids[idx - 1]
+                prev_prog = prog_map.get(prev_gid)
+                if prev_prog and prev_prog.get("easy_passed"):
+                    is_unlocked = True
+
+            if is_unlocked:
+                unlocked_group_ids.append(gid)
+                curr_prog = prog_map.get(gid)
+                if curr_prog and curr_prog.get("easy_passed"):
+                    medium_unlocked_group_ids.append(gid)
+                if curr_prog and curr_prog.get("medium_passed"):
+                    hard_unlocked_group_ids.append(gid)
+
+    return {
+        "unlocked_group_ids": unlocked_group_ids,
+        "medium_unlocked_group_ids": medium_unlocked_group_ids,
+        "hard_unlocked_group_ids": hard_unlocked_group_ids,
+        "has_unlocked_medium": len(medium_unlocked_group_ids) > 0,
+        "has_unlocked_hard": len(hard_unlocked_group_ids) > 0,
+    }
+
+
+def _pick_quiz_for_slot(cur, user_id: int, difficulty: str, exclude_quiz_id: int = None):
+    """
+    Pick a daily quiz slot for the user.
+    Strictly restricted to quizzes from active (non-deleted) lessons that the student has unlocked!
+    Never falls back to locked lessons or trashed content.
+    """
+    curriculum = _get_student_unlocked_curriculum(cur, user_id)
+
     target_groups = []
-    if target_difficulty == "hard":
-        target_groups = medium_passed_groups
-    elif target_difficulty == "medium":
-        target_groups = easy_passed_groups
-    else: # easy
-        target_groups = taken_groups if taken_groups else easy_passed_groups
+    if difficulty == "hard":
+        if not curriculum["has_unlocked_hard"]:
+            return None, None
+        target_groups = curriculum["hard_unlocked_group_ids"]
+    elif difficulty == "medium":
+        if not curriculum["has_unlocked_medium"]:
+            return None, None
+        target_groups = curriculum["medium_unlocked_group_ids"]
+    else:  # easy
+        target_groups = curriculum["unlocked_group_ids"]
 
-    # Helper function to query a quiz
-    def run_query(use_exclude: bool, use_groups: bool, use_difficulty: bool, diff_val: str):
-        where_clauses = []
-        params = []
-        
-        if use_difficulty:
-            where_clauses.append("q.difficulty = %s")
-            params.append(diff_val)
-            
-        if use_groups and target_groups:
-            where_clauses.append("l.lesson_group_id = ANY(%s)")
-            params.append(target_groups)
-            
+    if not target_groups:
+        return None, None
+
+    # Query matching quiz strictly from non-deleted quizzes, lessons, and lesson_groups
+    def run_query(use_exclude: bool):
+        where_clauses = [
+            "COALESCE(q.is_deleted, FALSE) = FALSE",
+            "COALESCE(l.is_deleted, FALSE) = FALSE",
+            "COALESCE(lg.is_deleted, FALSE) = FALSE",
+            "q.difficulty = %s",
+            "l.lesson_group_id = ANY(%s)",
+        ]
+        params = [difficulty, target_groups]
+
         if use_exclude and exclude_quiz_id is not None:
             where_clauses.append("q.id != %s")
             params.append(exclude_quiz_id)
-            
+
         where_str = " AND ".join(where_clauses)
-        if where_str:
-            where_str = "WHERE " + where_str
-            
         query = f"""
-            SELECT q.id, l.lesson_group_id 
-            FROM quizzes q 
-            LEFT JOIN lessons l ON q.lesson_id = l.id 
-            {where_str} 
+            SELECT q.id, l.lesson_group_id
+            FROM quizzes q
+            JOIN lessons l ON q.lesson_id = l.id
+            JOIN lesson_groups lg ON l.lesson_group_id = lg.id
+            WHERE {where_str}
             ORDER BY RANDOM() LIMIT 1
         """
         cur.execute(query, params)
         return cur.fetchone()
 
-    # Search strategy sequence:
-    for excl in [True, False]:
-        if excl and exclude_quiz_id is None:
-            continue
-            
-        # Try 1: matching difficulty and target groups
-        row = run_query(use_exclude=excl, use_groups=True, use_difficulty=True, diff_val=target_difficulty)
-        if row and row["id"]: return row["id"], row["lesson_group_id"]
-        
-        # Try 2: matching difficulty, ignore group filter
-        row = run_query(use_exclude=excl, use_groups=False, use_difficulty=True, diff_val=target_difficulty)
-        if row and row["id"]: return row["id"], row["lesson_group_id"]
+    # Try with exclude first if exclude_quiz_id is provided
+    if exclude_quiz_id is not None:
+        row = run_query(use_exclude=True)
+        if row and row["id"]:
+            return row["id"], row["lesson_group_id"]
 
-        # Try 3: ignore difficulty, ignore group filter (any quiz in system)
-        row = run_query(use_exclude=excl, use_groups=False, use_difficulty=False, diff_val="")
-        if row and row["id"]: return row["id"], row["lesson_group_id"]
+    # Try without exclude
+    row = run_query(use_exclude=False)
+    if row and row["id"]:
+        return row["id"], row["lesson_group_id"]
 
     return None, None
 
@@ -4415,43 +4471,96 @@ def get_daily_quizzes(user_id: int, client_date: Optional[str] = None):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = client_date if client_date else date.today()
+        today = client_date if client_date else str(date.today())
         total_stars = _get_total_stars(cur, user_id)
+        curriculum = _get_student_unlocked_curriculum(cur, user_id)
+
         slots = []
         for diff in ["easy", "medium", "hard"]:
+            # Check if this difficulty tier is locked for this student
+            is_locked = False
+            lock_reason = ""
+            if diff == "medium" and not curriculum["has_unlocked_medium"]:
+                is_locked = True
+                lock_reason = "Unlock Medium by scoring 70%+ on any Easy lesson"
+            elif diff == "hard" and not curriculum["has_unlocked_hard"]:
+                is_locked = True
+                lock_reason = "Unlock Hard by scoring 70%+ on any Medium lesson"
+
             cur.execute(
                 "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
                 (user_id, today, diff)
             )
             slot = cur.fetchone()
-            if not slot:
-                quiz_id, lg_id = _pick_quiz_for_slot(cur, user_id, diff)
-                cur.execute(
-                    "INSERT INTO daily_quiz_slots (user_id, slot_date, slot_difficulty, quiz_id, lesson_group_id) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id, slot_date, slot_difficulty) DO NOTHING RETURNING *",
-                    (user_id, today, diff, quiz_id, lg_id)
-                )
-                slot = cur.fetchone()
-                if not slot:
+
+            if is_locked:
+                # If tier is locked, ensure slot does not have a playable quiz
+                if slot and slot["quiz_id"] is not None and not slot["completed"]:
                     cur.execute(
-                        "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
+                        "UPDATE daily_quiz_slots SET quiz_id = NULL, lesson_group_id = NULL WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
+                        (user_id, today, diff)
+                    )
+                    slot["quiz_id"] = None
+                elif not slot:
+                    cur.execute(
+                        "INSERT INTO daily_quiz_slots (user_id, slot_date, slot_difficulty, quiz_id, lesson_group_id) VALUES (%s, %s, %s, NULL, NULL) ON CONFLICT (user_id, slot_date, slot_difficulty) DO NOTHING RETURNING *",
                         (user_id, today, diff)
                     )
                     slot = cur.fetchone()
+            else:
+                # Slot is unlocked
+                # If slot exists with quiz_id, verify that quiz_id is still valid, not deleted, and from an unlocked group
+                needs_new_quiz = False
+                if not slot:
+                    needs_new_quiz = True
+                elif slot["quiz_id"] is not None and not slot["completed"]:
+                    cur.execute(
+                        """SELECT q.id FROM quizzes q
+                           JOIN lessons l ON q.lesson_id = l.id
+                           JOIN lesson_groups lg ON l.lesson_group_id = lg.id
+                           WHERE q.id = %s
+                             AND COALESCE(q.is_deleted, FALSE) = FALSE
+                             AND COALESCE(l.is_deleted, FALSE) = FALSE
+                             AND COALESCE(lg.is_deleted, FALSE) = FALSE""",
+                        (slot["quiz_id"],)
+                    )
+                    active_quiz = cur.fetchone()
+                    if not active_quiz:
+                        needs_new_quiz = True
+
+                if needs_new_quiz:
+                    quiz_id, lg_id = _pick_quiz_for_slot(cur, user_id, diff)
+                    if not slot:
+                        cur.execute(
+                            "INSERT INTO daily_quiz_slots (user_id, slot_date, slot_difficulty, quiz_id, lesson_group_id) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id, slot_date, slot_difficulty) DO UPDATE SET quiz_id = EXCLUDED.quiz_id, lesson_group_id = EXCLUDED.lesson_group_id RETURNING *",
+                            (user_id, today, diff, quiz_id, lg_id)
+                        )
+                        slot = cur.fetchone()
+                    else:
+                        cur.execute(
+                            "UPDATE daily_quiz_slots SET quiz_id = %s, lesson_group_id = %s WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s RETURNING *",
+                            (quiz_id, lg_id, user_id, today, diff)
+                        )
+                        slot = cur.fetchone()
+
             quiz_title = None
-            if slot and slot["quiz_id"]:
+            if slot and slot["quiz_id"] and not is_locked:
                 cur.execute("SELECT title FROM quizzes WHERE id = %s", (slot["quiz_id"],))
                 qt = cur.fetchone()
                 quiz_title = qt["title"] if qt else None
+
             slots.append({
                 "slot_difficulty": diff,
-                "quiz_id": slot["quiz_id"] if slot else None,
-                "quiz_title": quiz_title,
+                "quiz_id": slot["quiz_id"] if (slot and not is_locked) else None,
+                "quiz_title": quiz_title if (slot and not is_locked) else (lock_reason if is_locked else None),
                 "completed": slot["completed"] if slot else False,
                 "refresh_used": slot["refresh_used"] if slot else False,
                 "stars_earned": slot["stars_earned"] if slot else 0,
-                "can_refresh": not (slot["refresh_used"] if slot else True),
+                "can_refresh": (not is_locked) and not (slot["refresh_used"] if slot else True) and (not (slot["completed"] if slot else False)),
                 "refresh_cost": DAILY_REFRESH_COST,
                 "slot_reward": DAILY_STAR_REWARDS.get(diff, 10),
+                "is_locked": is_locked,
+                "lock_reason": lock_reason,
             })
         conn.commit()
         completed_count = sum(1 for s in slots if s["completed"])
@@ -4471,6 +4580,7 @@ def get_daily_quizzes(user_id: int, client_date: Optional[str] = None):
 class DailyRefreshRequest(BaseModel):
     slot_difficulty: str
     topic_id: Optional[str] = None
+    client_date: Optional[str] = None
 
 @app.post("/daily-quizzes/{user_id}/refresh")
 def refresh_daily_slot(user_id: int, req: DailyRefreshRequest):
@@ -4478,10 +4588,10 @@ def refresh_daily_slot(user_id: int, req: DailyRefreshRequest):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = date.today()
+        today = req.client_date if req.client_date else str(date.today())
         cur.execute(
-            "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
-            (user_id, today, req.slot_difficulty)
+            "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND (slot_date = %s OR slot_date = %s) AND slot_difficulty = %s",
+            (user_id, today, date.today(), req.slot_difficulty)
         )
         slot = cur.fetchone()
         if not slot:
@@ -4493,11 +4603,15 @@ def refresh_daily_slot(user_id: int, req: DailyRefreshRequest):
         total_stars = _get_total_stars(cur, user_id)
         if total_stars < DAILY_REFRESH_COST:
             raise HTTPException(status_code=400, detail=f"Need {DAILY_REFRESH_COST} stars to refresh.")
-        _deduct_stars(cur, user_id, DAILY_REFRESH_COST, req.topic_id)
+        
         new_quiz_id, new_lg_id = _pick_quiz_for_slot(cur, user_id, req.slot_difficulty, slot["quiz_id"])
+        if not new_quiz_id:
+            raise HTTPException(status_code=400, detail="No alternative quiz available for this unlocked tier.")
+
+        _deduct_stars(cur, user_id, DAILY_REFRESH_COST, req.topic_id)
         cur.execute(
-            "UPDATE daily_quiz_slots SET quiz_id = %s, lesson_group_id = %s, refresh_used = TRUE WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
-            (new_quiz_id, new_lg_id, user_id, today, req.slot_difficulty)
+            "UPDATE daily_quiz_slots SET quiz_id = %s, lesson_group_id = %s, refresh_used = TRUE WHERE id = %s",
+            (new_quiz_id, new_lg_id, slot["id"])
         )
         conn.commit()
         quiz_title = None
@@ -4520,6 +4634,7 @@ class DailyCompleteRequest(BaseModel):
     total_questions: int
     time_spent_seconds: int = 0
     topic_id: Optional[str] = None
+    client_date: Optional[str] = None
 
 @app.post("/daily-quizzes/{user_id}/complete")
 def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
@@ -4527,16 +4642,27 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        today = date.today()
+        target_date = req.client_date if req.client_date else str(date.today())
+        
+        # Check matching slot for target_date or server date.today()
         cur.execute(
-            "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
-            (user_id, today, req.slot_difficulty)
+            "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND (slot_date = %s OR slot_date = %s) AND slot_difficulty = %s",
+            (user_id, target_date, date.today(), req.slot_difficulty)
         )
         slot = cur.fetchone()
+        if not slot:
+            # Tolerant fallback: check most recent uncompleted slot for this difficulty
+            cur.execute(
+                "SELECT * FROM daily_quiz_slots WHERE user_id = %s AND slot_difficulty = %s ORDER BY slot_date DESC LIMIT 1",
+                (user_id, req.slot_difficulty)
+            )
+            slot = cur.fetchone()
+
         if not slot:
             raise HTTPException(status_code=404, detail="Daily quiz slot not found.")
         if slot["completed"]:
             return {"success": True, "message": "Already completed.", "stars_earned": slot["stars_earned"]}
+        
         total = max(req.total_questions, 1)
         accuracy = (req.score / total) * 100
         passed = accuracy >= 70.0
@@ -4552,23 +4678,35 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
                 "bonus_awarded": False,
                 "bonus_stars": 0,
             }
+        
         slot_stars = DAILY_STAR_REWARDS.get(req.slot_difficulty, 10)
         cur.execute(
-            "UPDATE daily_quiz_slots SET completed = TRUE, stars_earned = %s WHERE user_id = %s AND slot_date = %s AND slot_difficulty = %s",
-            (slot_stars, user_id, today, req.slot_difficulty)
+            "UPDATE daily_quiz_slots SET completed = TRUE, stars_earned = %s WHERE id = %s",
+            (slot_stars, slot["id"])
         )
         if slot_stars > 0:
             _add_stars(cur, user_id, slot_stars, req.topic_id or "general")
-        _update_student_streak(cur, user_id)
+        
+        # Update streak using client's local date
+        streak_date = date.today()
+        if req.client_date:
+            try:
+                streak_date = datetime.strptime(req.client_date, "%Y-%m-%d").date()
+            except Exception:
+                streak_date = date.today()
+        _update_student_streak(cur, user_id, streak_date)
+
+        # Count completed slots for that slot's date
         cur.execute(
             "SELECT COUNT(*) AS cnt FROM daily_quiz_slots WHERE user_id = %s AND slot_date = %s AND completed = TRUE",
-            (user_id, today)
+            (user_id, slot["slot_date"])
         )
         completed_count = cur.fetchone()["cnt"]
         bonus_awarded = False
         if completed_count == 3:
             bonus_awarded = True
             _add_stars(cur, user_id, DAILY_FULL_CLEAR_BONUS, req.topic_id or "general")
+            
         conn.commit()
         cur.close()
         conn.close()
@@ -4577,6 +4715,7 @@ def complete_daily_quiz(user_id: int, req: DailyCompleteRequest):
             "accuracy_pct": round(accuracy, 1), "stars_earned": slot_stars,
             "bonus_awarded": bonus_awarded,
             "bonus_stars": DAILY_FULL_CLEAR_BONUS if bonus_awarded else 0,
+            "completed_count": completed_count,
         }
     except HTTPException:
         raise
@@ -5720,6 +5859,12 @@ def delete_quiz(quiz_id: int, teacher_name: str = "Teacher", teacher_id: Optiona
         cur.execute(
             "UPDATE quizzes SET is_deleted = TRUE, deleted_at = NOW(), deleted_by = %s WHERE id = %s",
             (teacher_name, quiz_id)
+        )
+        cur.execute(
+            """UPDATE daily_quiz_slots 
+               SET quiz_id = NULL 
+               WHERE quiz_id = %s AND completed = FALSE""",
+            (quiz_id,)
         )
         conn.commit()
         cur.close()
