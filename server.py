@@ -856,7 +856,8 @@ def _adaptive_question_selection(cur, user_id: int, all_questions: list, n: int 
     """
     Phase 2 — Pedagogical Model: Adaptive question selection using BKT mastery.
     Prioritises KCs where P(mastery) is in 0.3-0.7 (Zone of Proximal Development).
-    Falls back to random priority when no KC tag exists or no data yet.
+    Guarantees a fair and balanced distribution across choice letters (A, B, C, D)
+    so that in any 10-question set, each letter has 2-3 correct choices.
     """
     scored = []
     for q in all_questions:
@@ -866,14 +867,62 @@ def _adaptive_question_selection(cur, user_id: int, all_questions: list, n: int 
             # ZPD priority: highest score at mastery=0.5, drops off toward 0 or 1
             priority = 1.0 - abs(p_mastery - 0.5) * 2.0
         else:
-            # No KC tag → mid priority with randomness (same as Phase 1 random)
+            # No KC tag → mid priority with randomness
             priority = 0.5
         # Add a small random jitter so equal-priority KCs are not deterministic
         priority += random.uniform(-0.05, 0.05)
         scored.append((priority, q))
 
+    # Sort all questions by BKT ZPD priority
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [q for _, q in scored[:n]]
+
+    if len(all_questions) <= n:
+        result = [q for _, q in scored]
+        random.shuffle(result)
+        return result
+
+    # Group scored questions by correct_option_letter ('A', 'B', 'C', 'D')
+    by_letter = {"A": [], "B": [], "C": [], "D": []}
+    for prio, q in scored:
+        let = (q.get("correct_option_letter") or "A").strip().upper()
+        if let in by_letter:
+            by_letter[let].append(q)
+        else:
+            by_letter["A"].append(q)
+
+    # Calculate fair target quotas per letter for n questions
+    # E.g., for n=10: base quota is 2 each (8 total), and 2 letters get +1 (target: 3, 3, 2, 2)
+    letters = ["A", "B", "C", "D"]
+    base_quota = n // len(letters)
+    rem = n % len(letters)
+    extra_letters = set(random.sample(letters, rem))
+    targets = {let: base_quota + (1 if let in extra_letters else 0) for let in letters}
+
+    selected = []
+    selected_ids = set()
+
+    # Step 1: Pick up to target quota for each letter from top BKT priorities
+    for let in letters:
+        target_count = targets[let]
+        picked_count = 0
+        for q in by_letter[let]:
+            if picked_count < target_count and q["id"] not in selected_ids:
+                selected.append(q)
+                selected_ids.add(q["id"])
+                picked_count += 1
+
+    # Step 2: Fill remaining quota if some letters had fewer questions than target
+    if len(selected) < n:
+        for prio, q in scored:
+            if q["id"] not in selected_ids:
+                selected.append(q)
+                selected_ids.add(q["id"])
+                if len(selected) >= n:
+                    break
+
+    # Shuffle selected questions so answer letters are naturally interleaved across the quiz
+    random.shuffle(selected)
+    return selected
 
 
 def _upsert_kc_mastery(cur, user_id: int, kc_name: str, is_correct: bool):
@@ -3488,6 +3537,41 @@ def delete_kc(kc_name: str):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/recompute-bkt-history")
+def recompute_bkt_history():
+    """
+    Replays all historical student_question_answers sequentially
+    to recalculate student_kc_mastery according to current question KC tags.
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Clear existing student_kc_mastery
+        cur.execute("TRUNCATE TABLE student_kc_mastery")
+
+        # Fetch all answers joined with quiz attempt user_id and completed_at, ordered chronologically
+        cur.execute("""
+            SELECT sqa.question_id, sqa.is_correct, sqa_att.user_id, q.knowledge_component
+            FROM student_question_answers sqa
+            JOIN student_quiz_attempts sqa_att ON sqa.attempt_id = sqa_att.id
+            JOIN questions q ON sqa.question_id = q.id
+            WHERE q.knowledge_component IS NOT NULL
+            ORDER BY sqa_att.completed_at ASC, sqa.id ASC
+        """)
+        answers = cur.fetchall()
+        for ans in answers:
+            if ans["knowledge_component"]:
+                _upsert_kc_mastery(cur, ans["user_id"], ans["knowledge_component"], ans["is_correct"])
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"success": True, "recomputed_answers": len(answers)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════

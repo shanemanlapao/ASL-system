@@ -22,6 +22,7 @@ import { useAccessibility } from "../../context/AccessibilityContext";
 import { getCachedTopicLessons, getCachedStudentProgress } from "../../context/OfflineCache";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { translateToAslGloss } from "../../context/aslTranslator";
+import AnimatedBackground from "../../components/AnimatedBackground";
 
 // --- Types -------------------------------------------------------------------
 
@@ -255,15 +256,17 @@ export default function DifficultyScreen() {
     if (!lesson) return;
     setActiveLesson(lesson);
 
-    // Restore persistent slide index if available
+    // Restore persistent slide index if available (starts at slide 1 if completed or retaken)
     try {
       const savedIndexStr = await AsyncStorage.getItem(`@brightpath_lesson_slide_${userId}_${lesson.id}`);
       if (savedIndexStr !== null) {
         const savedIndex = parseInt(savedIndexStr, 10);
-        if (!isNaN(savedIndex) && savedIndex >= 0 && savedIndex < (lesson.slides?.length || 0)) {
+        const totalSlides = lesson.slides?.length || 0;
+        if (!isNaN(savedIndex) && savedIndex >= 0 && savedIndex < totalSlides - 1) {
           setActiveDescIndex(savedIndex);
         } else {
           setActiveDescIndex(0);
+          saveSlideProgress(lesson.id, 0);
         }
       } else {
         setActiveDescIndex(0);
@@ -365,6 +368,7 @@ export default function DifficultyScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+      <AnimatedBackground opacity={0.35} />
       {/* 1. Header */}
       <View style={styles.header}>
         <TouchableOpacity style={[styles.backButton, { backgroundColor: theme.light }]} onPress={() => router.back()}>
@@ -426,7 +430,7 @@ export default function DifficultyScreen() {
                 ]}>
                   <Ionicons
                     name={!unlocked ? "lock-closed" : diffConfig.icon}
-                    size={26}
+                    size={28}
                     color={!unlocked ? COLORS.textMuted : diffConfig.color}
                   />
                 </View>
@@ -447,21 +451,19 @@ export default function DifficultyScreen() {
                     ) : null}
                   </View>
 
-                  <Text style={styles.cardSub}>
-                    {!lessonExists
-                      ? "Not available yet (Slides in development)"
-                      : !unlocked
-                      ? diff === 'medium'
+                  {!unlocked && (
+                    <Text style={styles.cardSub}>
+                      {!lessonExists
+                        ? "Not available yet (Slides in development)"
+                        : diff === 'medium'
                         ? "Score 70%+ on Easy to unlock"
-                        : "Score 70%+ on Medium to unlock"
-                      : isPassed
-                      ? "Tap to review story slides and quiz"
-                      : "Tap to read lesson slides and take quiz"}
-                  </Text>
+                        : "Score 70%+ on Medium to unlock"}
+                    </Text>
+                  )}
                 </View>
 
                 {unlocked && lessonExists && (
-                  <Ionicons name="arrow-forward" size={18} color={diffConfig.color} style={{ marginLeft: 6 }} />
+                  <Ionicons name="arrow-forward" size={20} color={diffConfig.color} style={{ marginLeft: 6 }} />
                 )}
               </View>
             </TouchableOpacity>
@@ -475,14 +477,24 @@ export default function DifficultyScreen() {
           animationType="slide"
           transparent={false}
           visible={!!activeLesson}
-          onRequestClose={() => setActiveLesson(null)}
+          onRequestClose={() => {
+            if (activeLesson && activeDescIndex >= (activeLesson.slides?.length || 1) - 1) {
+              saveSlideProgress(activeLesson.id, 0);
+            }
+            setActiveLesson(null);
+          }}
         >
           <SafeAreaView style={styles.modalContainer} edges={['top', 'bottom']}>
             {/* Modal Header */}
             <View style={styles.modalHeader}>
               <TouchableOpacity
                 style={[styles.backButton, { backgroundColor: theme.light }]}
-                onPress={() => setActiveLesson(null)}
+                onPress={() => {
+                  if (activeLesson && activeDescIndex >= (activeLesson.slides?.length || 1) - 1) {
+                    saveSlideProgress(activeLesson.id, 0);
+                  }
+                  setActiveLesson(null);
+                }}
               >
                 <Ionicons name="close" size={22} color={theme.primary} />
               </TouchableOpacity>
@@ -494,18 +506,14 @@ export default function DifficultyScreen() {
                   {activeLesson.difficulty.toUpperCase()} TIER • SLIDE {activeDescIndex + 1} OF {activeLesson.slides.length}
                 </Text>
               </View>
-              {activeDescIndex > 0 && (
-                <TouchableOpacity
-                  style={[styles.backButton, { backgroundColor: theme.light, marginLeft: 8 }]}
-                  onPress={() => {
-                    setActiveDescIndex(0);
-                    if (activeLesson) saveSlideProgress(activeLesson.id, 0);
-                  }}
-                  accessibilityLabel="Restart from Slide 1"
-                >
-                  <Ionicons name="refresh" size={18} color={theme.primary} />
-                </TouchableOpacity>
-              )}
+              <TouchableOpacity
+                style={[styles.aslHeaderBtn, { backgroundColor: theme.primary }]}
+                activeOpacity={0.85}
+                onPress={() => { setAslDrawerVisible(true); setAslResult(''); }}
+              >
+                <Ionicons name="hand-left" size={16} color="#FFFFFF" />
+                <Text style={styles.aslHeaderBtnText}>ASL Helper</Text>
+              </TouchableOpacity>
             </View>
 
             <View style={styles.readerContent}>
@@ -565,18 +573,19 @@ export default function DifficultyScreen() {
 
                 {activeDescIndex < activeLesson.slides.length - 1 ? (
                   <TouchableOpacity
-                    style={[styles.navBtn, { backgroundColor: theme.light }]}
+                    style={[styles.navBtn, styles.nextBtn, { backgroundColor: theme.primary }]}
                     onPress={handleNextSlide}
                     activeOpacity={0.8}
                   >
-                    <Text style={[styles.navBtnText, { color: theme.primary }]}>Next</Text>
-                    <Ionicons name="arrow-forward" size={20} color={theme.primary} />
+                    <Text style={styles.nextBtnText}>Next</Text>
+                    <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
                   </TouchableOpacity>
                 ) : (
                   <TouchableOpacity
                     style={styles.quizStartBtn}
                     onPress={() => {
                       const qId = activeLesson.quiz_id;
+                      saveSlideProgress(activeLesson.id, 0);
                       setActiveLesson(null);
                       router.push(`/quiz/${topicId}?subjectId=${subjectId}&deafEnglish=${isDeafEnglish}&lessonId=${activeLesson.id}&quizId=${qId || ''}&difficulty=${activeLesson.difficulty}` as any);
                     }}
@@ -588,16 +597,6 @@ export default function DifficultyScreen() {
                 )}
               </View>
             </View>
-
-            {/* Floating ASL Helper Button */}
-            <TouchableOpacity
-              style={styles.aslFloatBtn}
-              activeOpacity={0.85}
-              onPress={() => { setAslDrawerVisible(true); setAslResult(''); }}
-            >
-              <Ionicons name="hand-left" size={20} color="#FFFFFF" />
-              <Text style={styles.aslFloatBtnText}>ASL Helper</Text>
-            </TouchableOpacity>
 
             {/* ASL / Deaf English Slide Helper Drawer Modal */}
             <Modal
@@ -716,15 +715,17 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   scrollContent: {
-    padding: 16,
-    paddingBottom: 32,
+    padding: 18,
+    paddingBottom: 40,
   },
   // Tier Cards
   diffCard: {
     backgroundColor: COLORS.card,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+    borderRadius: 20,
+    padding: 22,
+    marginBottom: 18,
+    minHeight: 90,
+    justifyContent: 'center',
     borderWidth: 1.5,
     elevation: 2,
     shadowColor: '#0F172A',
@@ -745,25 +746,25 @@ const styles = StyleSheet.create({
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
+    gap: 16,
   },
   cardIconBox: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
+    width: 56,
+    height: 56,
+    borderRadius: 16,
     justifyContent: 'center',
     alignItems: 'center',
   },
   cardTitle: {
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 21,
+    fontWeight: '800',
     color: COLORS.textPrimary,
   },
   cardSub: {
-    fontSize: 12.5,
+    fontSize: 13,
     color: COLORS.textSecondary,
-    marginTop: 2,
-    lineHeight: 16,
+    marginTop: 4,
+    lineHeight: 18,
   },
   recommendedBadge: {
     flexDirection: 'row',
@@ -927,23 +928,32 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
   },
-  aslFloatBtn: {
-    position: 'absolute',
-    bottom: 80,
-    right: 18,
-    backgroundColor: COLORS.primary,
-    borderRadius: 24,
+  nextBtn: {
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+  },
+  nextBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  aslHeaderBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    elevation: 6,
-    shadowColor: COLORS.primary,
-    shadowOpacity: 0.35,
-    shadowRadius: 8,
     gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
   },
-  aslFloatBtnText: {
+  aslHeaderBtnText: {
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 13,

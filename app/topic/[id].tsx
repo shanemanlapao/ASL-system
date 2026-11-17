@@ -14,6 +14,7 @@ import {
   getCachedStudentProgress,
   preCacheTopicQuizzes,
 } from "../../context/OfflineCache";
+import AnimatedBackground from "../../components/AnimatedBackground";
 
 interface LessonGroup {
   id: number;
@@ -178,6 +179,7 @@ export default function TopicScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+      <AnimatedBackground opacity={0.30} />
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -283,7 +285,7 @@ const styles = StyleSheet.create({
   deafButtonText: { fontSize: 14, fontWeight: '600', color: '#0284C7' },
   deafButtonTextActive: { color: 'white' },
   scrollViewContent: { padding: 20, paddingBottom: 60 },
-  questCard: { backgroundColor: "white", borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1, borderColor: "#E0F2FE", shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 10, elevation: 2 },
+  questCard: { backgroundColor: "white", borderRadius: 18, padding: 20, marginBottom: 16, borderWidth: 1, borderColor: "#E0F2FE", shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 10, elevation: 2 },
   questCardLocked: { backgroundColor: "#F9FAFB", borderColor: "#E5E7EB", opacity: 0.75 },
   questCardActive: {
     borderColor: "#0284C7",
@@ -295,10 +297,10 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   questHeader: { flexDirection: "row", alignItems: "center" },
-  questIconContainer: { width: 56, height: 56, borderRadius: 16, justifyContent: "center", alignItems: "center", marginRight: 16 },
+  questIconContainer: { width: 60, height: 60, borderRadius: 18, justifyContent: "center", alignItems: "center", marginRight: 16 },
   questInfo: { flex: 1, justifyContent: "center" },
-  questTitle: { fontSize: 16, fontWeight: "700", color: "#1F2937", marginBottom: 4 },
-  questSubtitle: { fontSize: 13, color: "#6B7280" },
+  questTitle: { fontSize: 22, fontWeight: "800", color: "#1F2937", marginBottom: 6 },
+  questSubtitle: { fontSize: 14, color: "#6B7280" },
   badge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
   badgeText: { color: "white", fontSize: 12, fontWeight: "bold" },
   offlineBanner: {

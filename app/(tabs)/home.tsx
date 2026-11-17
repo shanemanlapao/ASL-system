@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
 import PermissionModal from '../../components/PermissionModal';
+import AnimatedBackground from '../../components/AnimatedBackground';
 import { useSubjects } from '../../context/SubjectsContext';
 import { API_URL, resolveMediaUrl } from '../../context/config';
 import { COLORS } from '../../context/theme';
@@ -195,6 +196,7 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <AnimatedBackground opacity={0.25} />
       <PermissionModal />
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
 

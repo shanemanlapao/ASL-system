@@ -325,23 +325,6 @@ export default function ReportScreen() {
           <Ionicons name="chevron-forward" size={18} color={COLORS.primary} />
         </TouchableOpacity>
 
-        {/* ── Phase 2: Skill Tree Banner ── */}
-        <TouchableOpacity
-          style={styles.skillTreeBanner}
-          onPress={() => router.push("/skill-tree" as any)}
-          activeOpacity={0.85}
-        >
-          <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-            <View style={[styles.bannerIconBox, { backgroundColor: "#EDE9FE" }]}>
-              <Ionicons name="git-network-outline" size={20} color={COLORS.primary} />
-            </View>
-            <View style={{ marginLeft: 12 }}>
-              <Text style={styles.skillTreeTitle}>View Skill Mastery Tree</Text>
-              <Text style={styles.skillTreeSub}>See your pyBKT knowledge tracing progress</Text>
-            </View>
-          </View>
-          <Ionicons name="chevron-forward" size={18} color={COLORS.primary} />
-        </TouchableOpacity>
 
         {/* Grouped Recent Quiz Attempts (Accordion View) */}
         {groupedAttempts.length > 0 && (

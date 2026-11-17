@@ -430,13 +430,8 @@ export default function FlashcardsScreen() {
               >
                 <View style={styles.cardSideContainer}>
                   <View style={styles.aslBox}>
-                    <Text style={styles.aslTag}>ASL GLOSS</Text>
+                    <Text style={styles.aslTag}>DEFINITION</Text>
                     <Text style={styles.aslText}>{currentCard.asl_gloss}</Text>
-                  </View>
-
-                  <View style={styles.defBox}>
-                    <Text style={styles.defLabel}>Definition:</Text>
-                    <Text style={styles.defText}>{currentCard.definition}</Text>
                   </View>
 
                   <View style={styles.exampleBox}>
@@ -444,7 +439,7 @@ export default function FlashcardsScreen() {
                     <Text style={styles.exampleText}>"{FLASHCARD_CONTENT[currentCard.id]?.example || currentCard.example}"</Text>
                   </View>
 
-                  <View style={[styles.flipPrompt, { marginTop: 12 }]}>
+                  <View style={[styles.flipPrompt, { marginTop: 16 }]}>
                     <Ionicons name="repeat-outline" size={16} color="#9CA3AF" />
                     <Text style={styles.flipPromptText}>Tap to Flip Back</Text>
                   </View>
@@ -615,33 +610,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
   },
-  cardTerm: { fontSize: 26, fontWeight: 'bold', color: '#1F2937', textAlign: 'center', marginBottom: 8 },
+  cardTerm: { fontSize: 32, fontWeight: '800', color: '#1F2937', textAlign: 'center', marginBottom: 10 },
   cardFrontHint: {
-    fontSize: 15,
+    fontSize: 18,
     fontWeight: '600',
     color: '#374151',
     textAlign: 'center',
     marginBottom: 16,
     paddingHorizontal: 12,
+    lineHeight: 24,
   },
   flipPrompt: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  flipPromptText: { fontSize: 12, color: '#9CA3AF', fontWeight: '600' },
+  flipPromptText: { fontSize: 13, color: '#9CA3AF', fontWeight: '600' },
   aslBox: {
     backgroundColor: '#EDE9FE',
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 14,
+    padding: 16,
     width: '100%',
-    marginBottom: 14,
+    marginBottom: 16,
     alignItems: 'center',
   },
-  aslTag: { fontSize: 11, fontWeight: 'bold', color: '#7C3AED', marginBottom: 4 },
-  aslText: { fontSize: 17, fontWeight: 'bold', color: '#5B21B6', textAlign: 'center' },
-  defBox: { width: '100%', marginBottom: 12 },
-  defLabel: { fontSize: 12, fontWeight: 'bold', color: '#4B5563', marginBottom: 2 },
-  defText: { fontSize: 14, color: '#1F2937', lineHeight: 20 },
-  exampleBox: { width: '100%', backgroundColor: 'white', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E5E7EB' },
-  exampleLabel: { fontSize: 12, fontWeight: 'bold', color: '#6B7280', marginBottom: 2 },
-  exampleText: { fontSize: 14, color: '#1F2937', fontStyle: 'italic', lineHeight: 20 },
+  aslTag: { fontSize: 12, fontWeight: '800', color: '#7C3AED', marginBottom: 6, letterSpacing: 0.5 },
+  aslText: { fontSize: 21, fontWeight: 'bold', color: '#5B21B6', textAlign: 'center', lineHeight: 28 },
+  exampleBox: { width: '100%', backgroundColor: 'white', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#E5E7EB' },
+  exampleLabel: { fontSize: 13, fontWeight: '800', color: '#6B7280', marginBottom: 6, letterSpacing: 0.3 },
+  exampleText: { fontSize: 21, color: '#1F2937', fontStyle: 'italic', lineHeight: 28, textAlign: 'center' },
   actionRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

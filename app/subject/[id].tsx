@@ -177,8 +177,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   topicName: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 20,
+    fontWeight: '800',
     color: '#1F2937',
     marginBottom: 4,
   },

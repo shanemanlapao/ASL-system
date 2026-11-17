@@ -29,6 +29,17 @@ import { translateToAslGloss } from "../../context/aslTranslator";
 
 const { width } = Dimensions.get('window');
 
+const OPTION_COLORS: { border: string; iconBg: string; letter: string; selectedBg: string }[] = [
+  { border: '#8B5CF6', iconBg: '#EDE9FE', letter: '#7C3AED', selectedBg: '#F5F3FF' }, // A - Purple
+  { border: '#8B5CF6', iconBg: '#EDE9FE', letter: '#7C3AED', selectedBg: '#F5F3FF' }, // B - Purple (unified with A)
+  { border: '#8B5CF6', iconBg: '#EDE9FE', letter: '#7C3AED', selectedBg: '#F5F3FF' }, // C - Purple (unified with A)
+  { border: '#8B5CF6', iconBg: '#EDE9FE', letter: '#7C3AED', selectedBg: '#F5F3FF' }, // D & rest - Purple (unified with A)
+];
+
+const getOptionColor = (index: number) => {
+  return OPTION_COLORS[index] || OPTION_COLORS[3];
+};
+
 interface MatchPair {
   left: string;
   right: string;
@@ -632,6 +643,9 @@ export default function QuizScreen() {
 
     // Clear saved in-progress quiz since attempt is finished
     clearQuizProgress(targetQuizId);
+    if (lessonId) {
+      AsyncStorage.setItem(`@brightpath_lesson_slide_${userId}_${lessonId}`, '0').catch(() => {});
+    }
 
     try {
       if (attemptId) {
@@ -748,14 +762,23 @@ export default function QuizScreen() {
     }
   };
 
-  // Multiple Choice option handler
+  // Multiple Choice option selection handler (selects option without grading immediately)
   const handleSelectOption = (index: number) => {
     if (isAnswered) return;
+    if (index === eliminatedOptionIdx) return;
+    try {
+      Haptics.selectionAsync().catch(() => {});
+    } catch {}
     setSelectedOptionIndex(index);
+  };
+
+  // Multiple Choice confirmation handler (grades and submits the selected answer)
+  const handleConfirmAnswer = () => {
+    if (isAnswered || selectedOptionIndex === null) return;
     setIsAnswered(true);
 
     const timeSpent = Math.round((Date.now() - questionStartTimeRef.current) / 1000);
-    const selectedOpt = currentQuestion.options[index];
+    const selectedOpt = currentQuestion.options[selectedOptionIndex];
     const isCorrect = selectedOpt.id === currentQuestion.correctOptionId;
 
     let newScore = score;
@@ -827,7 +850,7 @@ export default function QuizScreen() {
           selectedText: selectedOpt?.text || "Your choice",
           correctText: correctOpt?.text || "Correct answer",
           reasonEn: scaffold.reasonEn,
-          reasonAsl: scaffold.reasonAsl,
+          reasonAsl: (scaffold.reasonAsl || '').replace(/^HINT:\s*/i, ''),
           kcDisplayName: scaffold.kcDisplayName,
           pendingScore: newScore,
           pendingAnswers: updatedAnswers,
@@ -1086,7 +1109,12 @@ export default function QuizScreen() {
             <TouchableOpacity
               style={styles.doneBtn}
               activeOpacity={0.85}
-              onPress={() => router.back()}
+              onPress={() => {
+                if (lessonId) {
+                  AsyncStorage.setItem(`@brightpath_lesson_slide_${userId}_${lessonId}`, '0').catch(() => {});
+                }
+                router.back();
+              }}
             >
               <Text style={styles.doneBtnText}>Back to Lessons</Text>
             </TouchableOpacity>
@@ -1170,14 +1198,33 @@ export default function QuizScreen() {
                 const isSelected = selectedOptionIndex === idx;
                 const isCorrect = option.id === currentQuestion.correctOptionId;
                 const isEliminated = idx === eliminatedOptionIdx;
-                let optionStyle: any = styles.optionCard;
+                const optColor = getOptionColor(idx);
+
+                let optionStyle: any = [
+                  styles.optionCard,
+                  { borderColor: optColor.border },
+                ];
 
                 if (isEliminated) {
                   optionStyle = [styles.optionCard, styles.optionEliminated];
                 } else if (isAnswered) {
                   if (isCorrect) optionStyle = styles.optionCorrect;
                   else if (isSelected) optionStyle = styles.optionWrong;
+                } else if (isSelected) {
+                  optionStyle = [
+                    styles.optionCard,
+                    {
+                      borderColor: optColor.border,
+                      borderWidth: 2,
+                      backgroundColor: optColor.selectedBg,
+                      shadowColor: optColor.border,
+                      shadowOpacity: 0.12,
+                      shadowRadius: 4,
+                      elevation: 2,
+                    },
+                  ];
                 }
+
                 if (highContrast && !isAnswered && !isEliminated) {
                   optionStyle = [optionStyle, { borderWidth: 2, borderColor: '#1E293B', backgroundColor: '#FFFFFF' }];
                 }
@@ -1187,16 +1234,31 @@ export default function QuizScreen() {
                     key={idx}
                     style={[
                       { width: '100%', position: 'relative' },
-                      isSelected && !isCorrect ? { transform: [{ translateX: shakeAnim }] } : null,
+                      isSelected && isAnswered && !isCorrect ? { transform: [{ translateX: shakeAnim }] } : null,
                     ]}
                   >
                     <TouchableOpacity
                       style={optionStyle}
                       disabled={isAnswered || isEliminated}
                       onPress={() => handleSelectOption(idx)}
+                      activeOpacity={0.8}
                     >
-                      <View style={[styles.optionLetterBox, isEliminated && styles.optionLetterBoxEliminated, highContrast && { backgroundColor: '#000000' }]}>
-                        <Text style={[styles.optionLetter, isEliminated && styles.optionLetterEliminated, highContrast && { color: '#FFFFFF', fontWeight: '900' }]}>
+                      <View
+                        style={[
+                          styles.optionLetterBox,
+                          { backgroundColor: optColor.iconBg, borderColor: optColor.border, borderWidth: 1 },
+                          isEliminated && styles.optionLetterBoxEliminated,
+                          highContrast && { backgroundColor: '#000000' },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.optionLetter,
+                            { color: optColor.letter },
+                            isEliminated && styles.optionLetterEliminated,
+                            highContrast && { color: '#FFFFFF', fontWeight: '900' },
+                          ]}
+                        >
                           {option.id}
                         </Text>
                       </View>
@@ -1277,6 +1339,17 @@ export default function QuizScreen() {
                   </View>
                 );
               })}
+
+              {/* Confirmation / Answer Button */}
+              {selectedOptionIndex !== null && !isAnswered && (
+                <TouchableOpacity
+                  style={styles.confirmAnswerBtn}
+                  onPress={handleConfirmAnswer}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.confirmAnswerBtnText}>Confirm Answer</Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
 
@@ -1474,50 +1547,23 @@ export default function QuizScreen() {
               </TouchableOpacity>
             </View>
 
-            {/* Your Choice vs Correct Answer Cards */}
-            <View style={styles.reviewCardsRow}>
-              {/* Selected Choice (Wrong) */}
-              <View style={styles.reviewWrongBox}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 3 }}>
-                  <Ionicons name="close-circle" size={14} color="#EF4444" style={{ marginRight: 4 }} />
-                  <Text style={styles.reviewWrongLabel}>Your Answer</Text>
-                </View>
-                <Text style={styles.reviewWrongText} numberOfLines={2}>
-                  {wrongFeedbackData?.selectedText}
-                </Text>
+            {/* Correct Answer Card (Full Width Green Box) */}
+            <View style={styles.reviewCorrectBoxFull}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                <Ionicons name="checkmark-circle" size={18} color="#10B981" style={{ marginRight: 6 }} />
+                <Text style={styles.reviewCorrectLabel}>Correct Answer</Text>
               </View>
-
-              {/* Correct Answer */}
-              <View style={styles.reviewCorrectBox}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 3 }}>
-                  <Ionicons name="checkmark-circle" size={14} color="#10B981" style={{ marginRight: 4 }} />
-                  <Text style={styles.reviewCorrectLabel}>Correct Answer</Text>
-                </View>
-                <Text style={styles.reviewCorrectText} numberOfLines={2}>
-                  {wrongFeedbackData?.correctText}
-                </Text>
-              </View>
+              <Text style={styles.reviewCorrectTextLarge}>
+                {wrongFeedbackData?.correctText}
+              </Text>
             </View>
 
-            {/* Integrated Explanation + ASL Scaffold Card */}
-            <View style={styles.reviewExplanationCard}>
-              <Text style={styles.reviewExplanationLabel}>EXPLANATION</Text>
-              <Text style={styles.reviewExplanationBody}>
-                {wrongFeedbackData?.reasonEn}
+            {/* ASL Explanation Box (Hand Icon Removed, Big Font) */}
+            <View style={styles.reviewAslCardLarge}>
+              <Text style={styles.reviewAslLabelLarge}>ASL EXPLANATION</Text>
+              <Text style={styles.reviewAslBodyLarge}>
+                {(wrongFeedbackData?.reasonAsl || wrongFeedbackData?.reasonEn || '').replace(/^HINT:\s*/i, '')}
               </Text>
-
-              {/* ASL / Deaf English Scaffolding Box */}
-              {!!wrongFeedbackData?.reasonAsl && (
-                <View style={styles.reviewAslBox}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
-                    <Ionicons name="hand-left" size={12} color={COLORS.primary} />
-                    <Text style={styles.reviewAslLabel}>ASL / DEAF ENGLISH</Text>
-                  </View>
-                  <Text style={styles.reviewAslBody}>
-                    {wrongFeedbackData?.reasonAsl}
-                  </Text>
-                </View>
-              )}
             </View>
 
             {/* Continue Button */}
@@ -1639,6 +1685,36 @@ const styles = StyleSheet.create({
   },
   optionLetter: { fontSize: 15, fontWeight: '700', color: COLORS.primary },
   optionText: { fontSize: 16, color: COLORS.textPrimary, flex: 1, fontWeight: '500' },
+  selectedCheckBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmAnswerBtn: {
+    backgroundColor: '#7C3AED',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    elevation: 3,
+    shadowColor: '#7C3AED',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
+  },
+  confirmAnswerBtnText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
   matchingContainer: { flexDirection: 'row', gap: 16 },
   matchingColumn: { flex: 1, gap: 10 },
   matchingColHeader: { fontSize: 14, fontWeight: '700', color: COLORS.textSecondary, marginBottom: 4 },
@@ -1952,93 +2028,51 @@ const styles = StyleSheet.create({
   reviewCloseBtn: {
     padding: 4,
   },
-  reviewCardsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 12,
-  },
-  reviewWrongBox: {
-    flex: 1,
-    backgroundColor: '#FEF2F2',
-    borderWidth: 1.5,
-    borderColor: '#FCA5A5',
-    borderRadius: 12,
-    padding: 10,
-  },
-  reviewWrongLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#DC2626',
-    marginLeft: 2,
-  },
-  reviewWrongText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#991B1B',
-    textDecorationLine: 'line-through',
-    marginTop: 3,
-  },
-  reviewCorrectBox: {
-    flex: 1,
+  reviewCorrectBoxFull: {
+    width: '100%',
     backgroundColor: '#F0FDF4',
     borderWidth: 1.5,
     borderColor: '#86EFAC',
-    borderRadius: 12,
-    padding: 10,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
   },
   reviewCorrectLabel: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     color: '#16A34A',
     marginLeft: 2,
+    letterSpacing: 0.3,
   },
-  reviewCorrectText: {
-    fontSize: 13,
+  reviewCorrectTextLarge: {
+    fontSize: 18,
     fontWeight: '700',
     color: '#166534',
-    marginTop: 3,
+    lineHeight: 24,
+    marginTop: 2,
   },
-  reviewExplanationCard: {
-    backgroundColor: '#F8FAFC',
+  reviewAslCardLarge: {
+    width: '100%',
+    backgroundColor: '#FAF5FF',
     borderRadius: 14,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 13,
-    marginBottom: 16,
+    padding: 16,
+    borderWidth: 1.5,
+    borderColor: '#DDD6FE',
+    marginBottom: 18,
   },
-  reviewExplanationLabel: {
-    fontSize: 10.5,
-    fontWeight: '700',
-    color: COLORS.textSecondary,
+  reviewAslLabelLarge: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#7C3AED',
     letterSpacing: 0.5,
-    marginBottom: 4,
+    marginBottom: 6,
   },
-  reviewExplanationBody: {
-    fontSize: 13.5,
-    color: COLORS.textPrimary,
-    lineHeight: 20,
-    fontWeight: '500',
-  },
-  reviewAslBox: {
-    backgroundColor: COLORS.primaryLight,
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primaryBorder,
-  },
-  reviewAslLabel: {
-    fontSize: 10.5,
-    fontWeight: '700',
-    color: COLORS.primary,
-    letterSpacing: 0.5,
-  },
-  reviewAslBody: {
-    fontSize: 12.5,
-    fontWeight: '700',
-    color: COLORS.primaryDark,
-    lineHeight: 18,
-    letterSpacing: 0.2,
+  reviewAslBodyLarge: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#3B0764',
+    lineHeight: 26,
+    letterSpacing: 0.1,
   },
   reviewContinueBtn: {
     backgroundColor: COLORS.primary,

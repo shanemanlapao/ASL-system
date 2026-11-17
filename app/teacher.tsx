@@ -191,6 +191,122 @@ export default function TeacherDashboardScreen() {
   const [searchStudentQuery, setSearchStudentQuery] = useState<string>('');
   const [studentSortBy, setStudentSortBy] = useState<'stars' | 'attempts' | 'needs_support'>('stars');
 
+  // Printable Reports State (Esteban R. Abada Memorial School)
+  const [showClassReportModal, setShowClassReportModal] = useState(false);
+  const [showStudentReportModal, setShowStudentReportModal] = useState(false);
+
+  // Inject web print CSS for Esteban R. Abada Memorial School formal reports
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      const styleId = 'esteban-report-print-style';
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.innerHTML = `
+          @media print {
+            body * {
+              visibility: hidden !important;
+            }
+            #printable-report-area, #printable-report-area * {
+              visibility: visible !important;
+            }
+            #printable-report-area {
+              position: absolute !important;
+              left: 0 !important;
+              top: 0 !important;
+              width: 100% !important;
+              margin: 0 !important;
+              padding: 10mm 14mm !important;
+              background: #ffffff !important;
+              color: #000000 !important;
+              box-shadow: none !important;
+              border: 1.5px solid #000000 !important;
+              z-index: 9999999 !important;
+            }
+            .no-print {
+              display: none !important;
+            }
+            @page {
+              size: A4 portrait;
+              margin: 8mm;
+            }
+          }
+        `;
+        document.head.appendChild(style);
+      }
+    }
+  }, []);
+
+  // Helper for practice duration formatting
+  const formatPracticeTime = (seconds?: number) => {
+    if (!seconds || seconds <= 0) return '0 mins';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    if (hrs > 0) {
+      return `${hrs}h ${mins}m`;
+    }
+    return `${mins || 1} mins`;
+  };
+
+  // Helper for triggering browser print
+  const handleTriggerPrint = () => {
+    if (Platform.OS === 'web') {
+      window.print();
+    } else {
+      showAlert('Print Report', 'Please open this screen in a web browser to print or save as PDF.');
+    }
+  };
+
+  // Helper for exporting Class Roster CSV
+  const handleExportClassCsv = () => {
+    if (!analyticsData?.student_roster || analyticsData.student_roster.length === 0) {
+      showAlert('No Data', 'No student records available to export.');
+      return;
+    }
+    const dateStr = new Date().toISOString().split('T')[0];
+    const teacherName = user?.name || user?.username || 'Teacher';
+
+    const rows: string[][] = [
+      ['ESTEBAN R. ABADA MEMORIAL SCHOOL'],
+      ['OFFICIAL CLASS PERFORMANCE ROSTER'],
+      ['Date Generated:', `"${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}"`],
+      ['Adviser / Teacher:', `"${teacherName}"`],
+      ['Total Enrolled Students:', String(analyticsData.total_students || analyticsData.student_roster.length)],
+      ['Class Mean Accuracy:', `"${Math.round(analyticsData.class_avg_accuracy ?? analyticsData.avg_accuracy ?? 0)}%"`],
+      [],
+      ['Student Name', 'Quizzes Completed', 'Mean Accuracy (%)', 'Total Stars', 'Activity Streak (Days)', 'Intervention Status'],
+    ];
+
+    analyticsData.student_roster.forEach((s: any) => {
+      const acc = Math.round(s.avg_accuracy || 0);
+      const status = acc < 50 ? 'Priority Remedial Review' : acc >= 75 ? 'Competent' : 'Developing';
+      rows.push([
+        `"${(s.name || s.username || 'Student').replace(/"/g, '""')}"`,
+        String(s.attempts_count || 0),
+        `"${acc}%"`,
+        String(s.total_stars || 0),
+        String(s.current_streak || 0),
+        `"${status}"`,
+      ]);
+    });
+
+    const csvContent = rows.map((r) => r.join(',')).join('\r\n');
+
+    if (Platform.OS === 'web') {
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Esteban_R_Abada_Class_Roster_${dateStr}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } else {
+      showAlert('Export Complete', 'CSV export file downloaded successfully.');
+    }
+  };
+
   // Pulse & Readiness Metrics
   const totalStories = lessonGroups.length;
   const totalTiers = lessonGroups.reduce((acc, g) => acc + (g.lessons?.length || 0), 0);
@@ -1317,7 +1433,6 @@ export default function TeacherDashboardScreen() {
                       >
                         <View style={{ flex: 1, marginRight: 12 }}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <Ionicons name="book" size={18} color="#4F46E5" />
                             <Text style={styles.storyCardTitle}>{group.title}</Text>
                             <View
                               style={[
@@ -1519,6 +1634,7 @@ export default function TeacherDashboardScreen() {
                     <TextInput
                       style={styles.input}
                       placeholder="e.g. The Lost Puppy"
+                      placeholderTextColor="#94A3B8"
                       value={lessonGroupName}
                       onChangeText={setLessonGroupName}
                     />
@@ -1655,6 +1771,7 @@ export default function TeacherDashboardScreen() {
                           <TextInput
                             style={[styles.input, styles.canvasTextArea]}
                             placeholder="Enter slide story or reading passage for Deaf students..."
+                            placeholderTextColor="#94A3B8"
                             value={currentSlide.description_text}
                             onChangeText={(txt) => {
                               const updated = [...descriptions];
@@ -1928,6 +2045,7 @@ export default function TeacherDashboardScreen() {
                 <TextInput
                   style={styles.input}
                   placeholder="e.g. The Lost Puppy Comprehension Check"
+                  placeholderTextColor="#94A3B8"
                   value={quizTitle}
                   onChangeText={setQuizTitle}
                 />
@@ -1956,6 +2074,7 @@ export default function TeacherDashboardScreen() {
                     <TextInput
                       style={[styles.input, styles.textArea]}
                       placeholder="Type the question statement here..."
+                      placeholderTextColor="#94A3B8"
                       value={q.question_text}
                       onChangeText={(txt) => {
                         const updated = [...questions];
@@ -1983,6 +2102,7 @@ export default function TeacherDashboardScreen() {
                           <TextInput
                             style={[styles.input, { flex: 1, marginBottom: 0 }]}
                             placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
+                            placeholderTextColor="#94A3B8"
                             value={opt}
                             onChangeText={(txt) => {
                               const updated = [...questions];
@@ -1999,6 +2119,7 @@ export default function TeacherDashboardScreen() {
                     <TextInput
                       style={styles.input}
                       placeholder="e.g. Look at the dog's collar in slide 2"
+                      placeholderTextColor="#94A3B8"
                       value={q.hint || ''}
                       onChangeText={(txt) => {
                         const updated = [...questions];
@@ -2169,14 +2290,33 @@ export default function TeacherDashboardScreen() {
                   {/* 3. Student Performance Directory (Uncluttered Roster) */}
                   <View style={styles.card}>
                     <View style={styles.analyticsSectionHeader}>
-                      <View>
+                      <View style={{ flex: 1, minWidth: 260, marginRight: 12 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                           <Ionicons name="school-outline" size={18} color="#4F46E5" />
                           <Text style={styles.cardTitle}>Student Performance Directory</Text>
                         </View>
                         <Text style={styles.analyticsSectionHint}>
-                          Click any student card to inspect detailed quiz attempts, cognitive BKT mastery, and badges
+                          Click any student card to inspect detailed quiz attempts, lesson competencies, and badges
                         </Text>
+                      </View>
+
+                      {/* Class Report & CSV Export Action Buttons */}
+                      <View style={styles.reportButtonsRow}>
+                        <TouchableOpacity
+                          style={styles.reportExportCsvBtn}
+                          onPress={handleExportClassCsv}
+                        >
+                          <Ionicons name="download-outline" size={15} color="#475569" />
+                          <Text style={styles.reportExportCsvBtnText}>Export CSV</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.reportPrintBtn}
+                          onPress={() => setShowClassReportModal(true)}
+                        >
+                          <Ionicons name="print-outline" size={15} color="#FFFFFF" />
+                          <Text style={styles.reportPrintBtnText}>Print Class Report (PDF)</Text>
+                        </TouchableOpacity>
                       </View>
                     </View>
 
@@ -2396,6 +2536,15 @@ export default function TeacherDashboardScreen() {
                           @{selectedStudentForInspect.username} • Enrolled Student
                         </Text>
                       </View>
+
+                      {/* Print Individual Student Diagnostic Report Button */}
+                      <TouchableOpacity
+                        style={styles.reportPrintBtn}
+                        onPress={() => setShowStudentReportModal(true)}
+                      >
+                        <Ionicons name="print-outline" size={15} color="#FFFFFF" />
+                        <Text style={styles.reportPrintBtnText}>Print Student Report (PDF)</Text>
+                      </TouchableOpacity>
                     </View>
 
                     {/* Quick Metric Stat Row */}
@@ -2474,7 +2623,7 @@ export default function TeacherDashboardScreen() {
                       onPress={() => setStudentDossierTab('mastery')}
                     >
                       <Ionicons
-                        name="hardware-chip-outline"
+                        name="school-outline"
                         size={16}
                         color={studentDossierTab === 'mastery' ? '#4F46E5' : '#64748B'}
                       />
@@ -2484,7 +2633,7 @@ export default function TeacherDashboardScreen() {
                           studentDossierTab === 'mastery' && styles.dossierSegmentTabTextActive,
                         ]}
                       >
-                        pyBKT Mastery ({studentKcMastery.length})
+                        Competency Breakdown ({studentKcMastery.length})
                       </Text>
                     </TouchableOpacity>
 
@@ -2695,14 +2844,14 @@ export default function TeacherDashboardScreen() {
                       {/* Explanatory Banner */}
                       <View style={styles.bktBanner}>
                         <View style={styles.bktBannerIcon}>
-                          <Ionicons name="hardware-chip-outline" size={20} color="#4F46E5" />
+                          <Ionicons name="ribbon-outline" size={20} color="#4F46E5" />
                         </View>
                         <View style={{ flex: 1 }}>
                           <Text style={styles.bktBannerTitle}>
-                            Bayesian Knowledge Tracing (pyBKT) Model
+                            Student Lesson & Skill Competency
                           </Text>
                           <Text style={styles.bktBannerDesc}>
-                            Estimates the student's latent mastery probability P(L) based on sequential quiz interactions, accounting for slip and guess probabilities.
+                            Tracks student learning progress and concept retention across quizzes, highlighting who has mastered the lesson and who needs review.
                           </Text>
                         </View>
                       </View>
@@ -2755,7 +2904,7 @@ export default function TeacherDashboardScreen() {
                               </View>
                               <View style={[styles.bktSummaryCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
                                 <Text style={[styles.bktSummaryValue, { color: '#DC2626' }]}>{struggling}</Text>
-                                <Text style={styles.bktSummaryLabel}>Struggling (&lt;30%)</Text>
+                                <Text style={styles.bktSummaryLabel}>Needs Support (&lt;30%)</Text>
                               </View>
                               <View style={[styles.bktSummaryCard, { borderColor: '#CBD5E1', backgroundColor: '#F8FAFC' }]}>
                                 <Text style={[styles.bktSummaryValue, { color: '#64748B' }]}>{notStarted}</Text>
@@ -2829,102 +2978,165 @@ export default function TeacherDashboardScreen() {
 
                                 return (
                                   <View key={topicId} style={{ marginBottom: 20 }}>
-                                    {/* Subject Section Header */}
+                                    {/* Subject Section Header Box with Title and Mastered/Untested together */}
                                     <View style={{
                                       flexDirection: 'row',
                                       alignItems: 'center',
-                                      justifyContent: 'space-between',
+                                      alignSelf: 'flex-start',
+                                      gap: 12,
                                       backgroundColor: meta.bg,
-                                      paddingVertical: 10,
+                                      paddingVertical: 7,
                                       paddingHorizontal: 14,
                                       borderRadius: 10,
-                                      borderLeftWidth: 4,
-                                      borderLeftColor: meta.color,
-                                      marginBottom: 10,
+                                      borderWidth: 1.8,
+                                      borderColor: meta.color + '60',
+                                      marginBottom: 12,
+                                      marginTop: 4,
                                     }}>
+                                      {/* Subject Icon & Title */}
                                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                                         <Ionicons name={meta.icon as any} size={18} color={meta.color} />
-                                        <Text style={{ fontSize: 15, fontWeight: '700', color: '#1E293B' }}>
+                                        <Text style={{ fontSize: 15, fontWeight: '800', color: '#1E293B' }}>
                                           {meta.label}
                                         </Text>
                                       </View>
-                                      <Text style={{ fontSize: 12, fontWeight: '600', color: meta.color }}>
+
+                                      {/* Subtle Vertical Divider */}
+                                      <View style={{ width: 1, height: 16, backgroundColor: meta.color + '40' }} />
+
+                                      {/* Mastered & Untested right beside the subject title */}
+                                      <Text style={{ fontSize: 12.5, fontWeight: '700', color: meta.color }}>
                                         {topicMastered}/{kcs.length} Mastered {topicUntested > 0 ? `• ${topicUntested} Untested` : ''}
                                       </Text>
                                     </View>
 
-                                    {/* Subject KC Cards */}
-                                    {kcs.map((kc: any) => {
-                                      const totalOpp = kc.total_opportunities || 0;
-                                      const pMastery = kc.p_mastery ?? 0;
-                                      const pct = Math.round(kc.p_mastery_pct ?? (pMastery * 100));
+                                    {/* Subject KC Cards Grid */}
+                                    <View style={styles.kcCardGrid}>
+                                      {kcs.map((kc: any) => {
+                                        const totalOpp = kc.total_opportunities || 0;
+                                        const pMastery = kc.p_mastery ?? 0;
+                                        const pct = Math.round(kc.p_mastery_pct ?? (pMastery * 100));
 
-                                      let statusLabel = 'Not Started';
-                                      let statusColor = '#64748B';
-                                      let statusBg = '#F1F5F9';
-                                      let barColor = '#CBD5E1';
+                                        let statusLabel = 'Untested';
+                                        let statusColor = '#64748B';
+                                        let statusBg = '#F8FAFC';
+                                        let statusBorder = '#E2E8F0';
+                                        let statusIcon = 'ellipse-outline';
+                                        let barColor = '#CBD5E1';
+                                        let actionBadge = null;
 
-                                      if (totalOpp > 0) {
-                                        if (pMastery >= 0.70) {
-                                          statusLabel = 'Mastered';
-                                          statusColor = '#059669';
-                                          statusBg = '#ECFDF5';
-                                          barColor = '#059669';
-                                        } else if (pMastery >= 0.30) {
-                                          statusLabel = 'Developing';
-                                          statusColor = '#D97706';
-                                          statusBg = '#FFFBEB';
-                                          barColor = '#D97706';
-                                        } else {
-                                          statusLabel = 'Struggling';
-                                          statusColor = '#DC2626';
-                                          statusBg = '#FEF2F2';
-                                          barColor = '#DC2626';
+                                        if (totalOpp > 0) {
+                                          if (pMastery >= 0.70) {
+                                            statusLabel = 'Mastered';
+                                            statusColor = '#059669';
+                                            statusBg = '#ECFDF5';
+                                            statusBorder = '#A7F3D0';
+                                            statusIcon = 'checkmark-circle';
+                                            barColor = '#059669';
+                                            actionBadge = { label: 'Competency Achieved', icon: 'ribbon-outline', color: '#059669', bg: '#F0FDF4', border: '#A7F3D0' };
+                                          } else if (pMastery >= 0.30) {
+                                            statusLabel = 'Developing';
+                                            statusColor = '#D97706';
+                                            statusBg = '#FFFBEB';
+                                            statusBorder = '#FDE68A';
+                                            statusIcon = 'flash-outline';
+                                            barColor = '#D97706';
+                                            actionBadge = { label: 'In Progress', icon: 'trending-up-outline', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' };
+                                          } else {
+                                            statusLabel = 'Needs Support';
+                                            statusColor = '#DC2626';
+                                            statusBg = '#FEF2F2';
+                                            statusBorder = '#FECACA';
+                                            statusIcon = 'alert-circle-outline';
+                                            barColor = '#DC2626';
+                                            actionBadge = { label: 'Needs Remedial Review', icon: 'warning-outline', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' };
+                                          }
                                         }
-                                      }
 
-                                      return (
-                                        <View key={kc.kc_name} style={styles.kcCard}>
-                                          <View style={styles.kcCardHeader}>
-                                            <View style={{ flex: 1, marginRight: 8 }}>
-                                              <Text style={styles.kcTitle}>{kc.display_name || kc.kc_name}</Text>
-                                              <Text style={styles.kcTopic}>{meta.label}</Text>
+                                        return (
+                                          <View key={kc.kc_name} style={styles.kcCard}>
+                                            {/* Card Main Body */}
+                                            <View style={styles.kcCardBody}>
+                                              {/* Header: Title + Status Pill */}
+                                              <View style={styles.kcCardHeader}>
+                                                <View style={{ flex: 1, marginRight: 8 }}>
+                                                  <Text style={styles.kcTitle} numberOfLines={2}>
+                                                    {kc.display_name || kc.kc_name}
+                                                  </Text>
+                                                </View>
+
+                                                <View style={[styles.kcStatusPill, { backgroundColor: statusBg, borderColor: statusBorder }]}>
+                                                  <Ionicons name={statusIcon as any} size={12} color={statusColor} />
+                                                  <Text style={[styles.kcStatusPillText, { color: statusColor }]}>
+                                                    {statusLabel}
+                                                  </Text>
+                                                </View>
+                                              </View>
+
+                                              {/* Middle Section: Progress & Action Badge */}
+                                              {totalOpp > 0 ? (
+                                                <View style={styles.kcGaugeSection}>
+                                                  <View style={styles.kcMasteryRow}>
+                                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                                      <Text style={styles.kcMasteryLabel}>Mastery Level</Text>
+                                                      {actionBadge && (
+                                                        <View style={[styles.kcActionTag, { backgroundColor: actionBadge.bg, borderColor: actionBadge.border }]}>
+                                                          <Ionicons name={actionBadge.icon as any} size={11} color={actionBadge.color} />
+                                                          <Text style={[styles.kcActionTagText, { color: actionBadge.color }]}>
+                                                            {actionBadge.label}
+                                                          </Text>
+                                                        </View>
+                                                      )}
+                                                    </View>
+                                                    <Text style={[styles.kcMasteryNumber, { color: statusColor }]}>{pct}%</Text>
+                                                  </View>
+
+                                                  {/* Progress Bar */}
+                                                  <View style={styles.kcProgressBarTrack}>
+                                                    <View
+                                                      style={[
+                                                        styles.kcProgressBarFill,
+                                                        { width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: barColor },
+                                                      ]}
+                                                    />
+                                                  </View>
+                                                </View>
+                                              ) : (
+                                                <View style={styles.kcUntestedBox}>
+                                                  <Text style={styles.kcUntestedText}>
+                                                    Ready for student assessment • 0 items completed
+                                                  </Text>
+                                                </View>
+                                              )}
                                             </View>
 
-                                            <View style={[styles.kcStatusPill, { backgroundColor: statusBg }]}>
-                                              <Text style={[styles.kcStatusPillText, { color: statusColor }]}>
-                                                {statusLabel}
-                                              </Text>
+                                            {/* Card Footer Tray */}
+                                            <View style={styles.kcCardFooterTray}>
+                                              {totalOpp > 0 ? (
+                                                <>
+                                                  <View style={styles.kcFooterStatsLeft}>
+                                                    <View style={styles.kcStatBadgeGreen}>
+                                                      <Ionicons name="checkmark-circle" size={13} color="#059669" />
+                                                      <Text style={styles.kcStatBadgeGreenText}>{kc.correct_count || 0} Correct</Text>
+                                                    </View>
+                                                    <View style={styles.kcStatBadgeRed}>
+                                                      <Ionicons name="close-circle" size={13} color="#DC2626" />
+                                                      <Text style={styles.kcStatBadgeRedText}>{kc.wrong_count || 0} Wrong</Text>
+                                                    </View>
+                                                  </View>
+                                                  <Text style={styles.kcFooterTotalText}>{totalOpp} {totalOpp === 1 ? 'Question' : 'Questions'}</Text>
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <Text style={styles.kcFooterUntestedText}>No question logs recorded</Text>
+                                                  <Text style={styles.kcFooterUntestedBadge}>0 Attempts</Text>
+                                                </>
+                                              )}
                                             </View>
                                           </View>
-
-                                          {/* Mastery Progress Bar */}
-                                          <View style={styles.kcProgressBarTrack}>
-                                            <View
-                                              style={[
-                                                styles.kcProgressBarFill,
-                                                { 
-                                                  width: totalOpp > 0 ? `${Math.min(100, Math.max(0, pct))}%` : '0%', 
-                                                  backgroundColor: barColor 
-                                                },
-                                              ]}
-                                            />
-                                          </View>
-
-                                          {/* Metrics Details */}
-                                          <View style={styles.kcFooterRow}>
-                                            <Text style={styles.kcMasteryPercent}>
-                                              P(Mastery): <Text style={{ color: totalOpp > 0 ? statusColor : '#64748B', fontWeight: '700' }}>
-                                                {totalOpp > 0 ? `${pct}%` : 'Baseline Prior (10%)'}
-                                              </Text>
-                                            </Text>
-                                            <Text style={styles.kcCountsText}>
-                                              {kc.correct_count || 0} Correct • {kc.wrong_count || 0} Wrong • {totalOpp} Opportunities
-                                            </Text>
-                                          </View>
-                                        </View>
-                                      );
-                                    })}
+                                        );
+                                      })}
+                                    </View>
                                   </View>
                                 );
                               })
@@ -3189,6 +3401,7 @@ export default function TeacherDashboardScreen() {
                         <TextInput
                           style={[styles.input, styles.canvasTextArea]}
                           placeholder="Enter slide story or reading passage for Deaf students..."
+                          placeholderTextColor="#94A3B8"
                           value={currentSlide.description_text}
                           onChangeText={(txt) => {
                             const updated = [...editSlides];
@@ -3366,6 +3579,7 @@ export default function TeacherDashboardScreen() {
                     <TextInput
                       style={[styles.input, styles.textArea]}
                       placeholder="Type question statement here..."
+                      placeholderTextColor="#94A3B8"
                       value={q.question_text}
                       onChangeText={(txt) => {
                         const updated = [...editQuizQuestions];
@@ -3393,6 +3607,7 @@ export default function TeacherDashboardScreen() {
                           <TextInput
                             style={[styles.input, { flex: 1, marginBottom: 0 }]}
                             placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
+                            placeholderTextColor="#94A3B8"
                             value={opt}
                             onChangeText={(txt) => {
                               const updated = [...editQuizQuestions];
@@ -3409,6 +3624,7 @@ export default function TeacherDashboardScreen() {
                     <TextInput
                       style={styles.input}
                       placeholder="e.g. Look at the dog's collar in slide 2"
+                      placeholderTextColor="#94A3B8"
                       value={q.hint || ''}
                       onChangeText={(txt) => {
                         const updated = [...editQuizQuestions];
@@ -3677,6 +3893,530 @@ export default function TeacherDashboardScreen() {
                 <Text style={styles.modalCancelBtnText}>Close</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── MODAL 5: PRINTABLE CLASS REPORT (ESTEBAN R. ABADA MEMORIAL SCHOOL) ── */}
+      <Modal
+        visible={showClassReportModal}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setShowClassReportModal(false)}
+      >
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalContainer}>
+            {/* Modal Non-Printable Action Bar */}
+            <View style={styles.reportModalTopBar}>
+              <View>
+                <Text style={styles.reportModalTopTitle}>Document Print Preview</Text>
+                <Text style={styles.reportModalTopSubtitle}>Official Academic Record • Esteban R. Abada Memorial School</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <TouchableOpacity
+                  style={styles.reportModalActionPrintBtn}
+                  onPress={handleTriggerPrint}
+                >
+                  <Ionicons name="print-outline" size={16} color="#FFFFFF" />
+                  <Text style={styles.reportModalActionPrintBtnText}>Print / Save as PDF</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.reportModalActionCloseBtn}
+                  onPress={() => setShowClassReportModal(false)}
+                >
+                  <Text style={styles.reportModalActionCloseBtnText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Printable Paper Canvas */}
+            <ScrollView style={styles.reportScrollContainer} contentContainerStyle={styles.reportScrollContent}>
+              <View
+                nativeID="printable-report-area"
+                {...({ id: 'printable-report-area' } as any)}
+                style={styles.reportPaper}
+              >
+                {/* 1. Official School Header */}
+                <View style={styles.formalDocHeader}>
+                  <Text style={styles.formalDocSchoolName}>ESTEBAN R. ABADA MEMORIAL SCHOOL</Text>
+                  <Text style={styles.formalDocTitle}>CLASS PERFORMANCE SUMMARY</Text>
+                  <View style={styles.formalDocMetaRow}>
+                    <Text style={styles.formalDocMetaText}>
+                      Date Generated: {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                    </Text>
+                    <Text style={styles.formalDocMetaText}>
+                      Adviser / Teacher: {user?.name || user?.username || 'Teacher'}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.formalDocDividerThick} />
+
+                {/* 2. Class Overview Box (Only Total Enrolled and Class Accuracy per specifications) */}
+                <View style={styles.formalSectionBox}>
+                  <View style={styles.formalSectionBoxHeader}>
+                    <Text style={styles.formalSectionBoxTitle}>CLASS OVERVIEW</Text>
+                  </View>
+                  <View style={styles.formalOverviewGrid}>
+                    <View style={styles.formalOverviewItem}>
+                      <Text style={styles.formalOverviewLabel}>Total Enrolled Students</Text>
+                      <Text style={styles.formalOverviewValue}>
+                        {analyticsData?.total_students || (analyticsData?.student_roster?.length || 0)}
+                      </Text>
+                    </View>
+                    <View style={styles.formalOverviewDivider} />
+                    <View style={styles.formalOverviewItem}>
+                      <Text style={styles.formalOverviewLabel}>Class Overall Accuracy</Text>
+                      <Text style={styles.formalOverviewValue}>
+                        {Math.round(analyticsData?.class_avg_accuracy ?? analyticsData?.avg_accuracy ?? 0)}%
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* 3. Student Performance Master Table */}
+                <View style={styles.formalSectionBox}>
+                  <View style={styles.formalSectionBoxHeader}>
+                    <Text style={styles.formalSectionBoxTitle}>STUDENT PERFORMANCE ROSTER</Text>
+                  </View>
+                  <View style={styles.formalTable}>
+                    {/* Table Header */}
+                    <View style={styles.formalTableHeaderRow}>
+                      <Text style={[styles.formalTableTh, { flex: 2 }]}>Student Name</Text>
+                      <Text style={[styles.formalTableTh, { flex: 1, textAlign: 'center' }]}>Quizzes Completed</Text>
+                      <Text style={[styles.formalTableTh, { flex: 1, textAlign: 'right' }]}>Mean Accuracy</Text>
+                    </View>
+                    {/* Table Rows */}
+                    {analyticsData?.student_roster && analyticsData.student_roster.length > 0 ? (
+                      analyticsData.student_roster.map((student: any, idx: number) => {
+                        return (
+                          <View
+                            key={student.user_id || student.id || idx}
+                            style={[
+                              styles.formalTableRow,
+                              idx % 2 === 1 && styles.formalTableRowAlt,
+                              idx === analyticsData.student_roster.length - 1 && styles.formalTableRowLast,
+                            ]}
+                          >
+                            <Text style={[styles.formalTableTd, { flex: 2, fontWeight: '600' }]}>
+                              {student.name || student.username || 'Student'}
+                            </Text>
+                            <Text style={[styles.formalTableTd, { flex: 1, textAlign: 'center' }]}>
+                              {student.attempts_count || 0}
+                            </Text>
+                            <Text style={[styles.formalTableTd, { flex: 1, textAlign: 'right', fontWeight: '700' }]}>
+                              {Math.round(student.avg_accuracy || 0)}%
+                            </Text>
+                          </View>
+                        );
+                      })
+                    ) : (
+                      <View style={styles.formalTableRow}>
+                        <Text style={[styles.formalTableTd, { flex: 4, textAlign: 'center', fontStyle: 'italic' }]}>
+                          No enrolled students recorded.
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+
+                {/* 4. Priority Remedial / Intervention List (< 50%) */}
+                {(() => {
+                  const strugglingList = (analyticsData?.student_roster || []).filter(
+                    (s: any) => Math.round(s.avg_accuracy || 0) < 50
+                  );
+                  return (
+                    <View style={styles.formalSectionBox}>
+                      <View style={styles.formalSectionBoxHeader}>
+                        <Text style={styles.formalSectionBoxTitle}>
+                          PRIORITY REMEDIAL &amp; INTERVENTION LIST (ACCURACY &lt; 50%)
+                        </Text>
+                      </View>
+                      <Text style={styles.formalSectionNote}>
+                        The following student(s) have demonstrated mean performance below the 50% competency threshold and are prioritized for structured remedial review and academic intervention:
+                      </Text>
+
+                      {strugglingList.length > 0 ? (
+                        <View style={styles.formalTable}>
+                          <View style={styles.formalTableHeaderRow}>
+                            <Text style={[styles.formalTableTh, { flex: 2 }]}>Student Name</Text>
+                            <Text style={[styles.formalTableTh, { flex: 1, textAlign: 'center' }]}>Mean Accuracy</Text>
+                            <Text style={[styles.formalTableTh, { flex: 2, textAlign: 'right' }]}>Intervention Status</Text>
+                          </View>
+                          {strugglingList.map((st: any, sIdx: number) => (
+                            <View
+                              key={st.user_id || st.id || sIdx}
+                              style={[
+                                styles.formalTableRow,
+                                sIdx % 2 === 1 && styles.formalTableRowAlt,
+                                sIdx === strugglingList.length - 1 && styles.formalTableRowLast,
+                              ]}
+                            >
+                              <Text style={[styles.formalTableTd, { flex: 2, fontWeight: '600' }]}>
+                                {st.name || st.username || 'Student'}
+                              </Text>
+                              <Text style={[styles.formalTableTd, { flex: 1, textAlign: 'center', fontWeight: '700' }]}>
+                                {Math.round(st.avg_accuracy || 0)}%
+                              </Text>
+                              <Text style={[styles.formalTableTd, { flex: 2, textAlign: 'right' }]}>
+                                [ PRIORITY REMEDIAL REVIEW ]
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : (
+                        <View style={styles.formalEmptyNoticeBox}>
+                          <Text style={styles.formalEmptyNoticeText}>
+                            No students currently fall below the 50% mastery threshold. All students are meeting expected competency benchmarks.
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })()}
+
+                {/* 5. DepEd Formal Signature Block */}
+                <View style={styles.formalSignatureBlock}>
+                  <View style={styles.formalSignatureCol}>
+                    <Text style={styles.formalSignatureRole}>Prepared by:</Text>
+                    <View style={styles.formalSignatureLine} />
+                    <Text style={styles.formalSignatureSigner}>{user?.name || user?.username || 'Class Adviser'}</Text>
+                    <Text style={styles.formalSignatureTitle}>Class Adviser / Teacher</Text>
+                    <Text style={styles.formalSignatureDate}>Date: ________________________</Text>
+                  </View>
+
+                  <View style={styles.formalSignatureCol}>
+                    <Text style={styles.formalSignatureRole}>Noted by:</Text>
+                    <View style={styles.formalSignatureLine} />
+                    <Text style={styles.formalSignatureSigner}>School Principal / Administrator</Text>
+                    <Text style={styles.formalSignatureTitle}>Esteban R. Abada Memorial School</Text>
+                    <Text style={styles.formalSignatureDate}>Date: ________________________</Text>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── MODAL 6: PRINTABLE INDIVIDUAL STUDENT DIAGNOSTIC REPORT (ESTEBAN R. ABADA MEMORIAL SCHOOL) ── */}
+      <Modal
+        visible={showStudentReportModal}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setShowStudentReportModal(false)}
+      >
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalContainer}>
+            {/* Modal Non-Printable Action Bar */}
+            <View style={styles.reportModalTopBar}>
+              <View>
+                <Text style={styles.reportModalTopTitle}>Student Diagnostic Print Preview</Text>
+                <Text style={styles.reportModalTopSubtitle}>Official Academic Record • Esteban R. Abada Memorial School</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <TouchableOpacity
+                  style={styles.reportModalActionPrintBtn}
+                  onPress={handleTriggerPrint}
+                >
+                  <Ionicons name="print-outline" size={16} color="#FFFFFF" />
+                  <Text style={styles.reportModalActionPrintBtnText}>Print / Save as PDF</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.reportModalActionCloseBtn}
+                  onPress={() => setShowStudentReportModal(false)}
+                >
+                  <Text style={styles.reportModalActionCloseBtnText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Printable Paper Canvas */}
+            <ScrollView style={styles.reportScrollContainer} contentContainerStyle={styles.reportScrollContent}>
+              <View
+                nativeID="printable-report-area"
+                {...({ id: 'printable-report-area' } as any)}
+                style={styles.reportPaper}
+              >
+                {/* 1. Official School Header */}
+                <View style={styles.formalDocHeader}>
+                  <Text style={styles.formalDocSchoolName}>ESTEBAN R. ABADA MEMORIAL SCHOOL</Text>
+                  <Text style={styles.formalDocTitle}>STUDENT INDIVIDUAL DIAGNOSTIC REPORT</Text>
+                  <View style={styles.formalDocMetaRow}>
+                    <Text style={styles.formalDocMetaText}>
+                      Date Generated: {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                    </Text>
+                    <Text style={styles.formalDocMetaText}>
+                      Adviser / Teacher: {user?.name || user?.username || 'Teacher'}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.formalDocDividerThick} />
+
+                {/* 2. Student Information (ONLY Student Name per specifications) */}
+                <View style={styles.formalSectionBox}>
+                  <View style={styles.formalSectionBoxHeader}>
+                    <Text style={styles.formalSectionBoxTitle}>STUDENT INFORMATION</Text>
+                  </View>
+                  <View style={styles.formalStudentProfileRow}>
+                    <Text style={styles.formalStudentProfileLabel}>Student Name:</Text>
+                    <Text style={styles.formalStudentProfileValue}>
+                      {selectedStudentForInspect?.name || selectedStudentForInspect?.username || 'Student'}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* 3. Academic Standing & Activity Metrics (4 metrics) */}
+                <View style={styles.formalSectionBox}>
+                  <View style={styles.formalSectionBoxHeader}>
+                    <Text style={styles.formalSectionBoxTitle}>ACADEMIC STANDING &amp; ACTIVITY METRICS</Text>
+                  </View>
+                  <View style={styles.formalMetricsGrid}>
+                    <View style={styles.formalMetricCell}>
+                      <Text style={styles.formalMetricLabel}>Score Accuracy</Text>
+                      <Text style={styles.formalMetricValue}>
+                        {Math.round(selectedStudentForInspect?.avg_accuracy || 0)}%
+                      </Text>
+                    </View>
+                    <View style={styles.formalMetricCell}>
+                      <Text style={styles.formalMetricLabel}>Total Stars Earned</Text>
+                      <Text style={styles.formalMetricValue}>
+                        {selectedStudentForInspect?.total_stars || 0}
+                      </Text>
+                    </View>
+                    <View style={styles.formalMetricCell}>
+                      <Text style={styles.formalMetricLabel}>Attendance / Activity Streak</Text>
+                      <Text style={styles.formalMetricValue}>
+                        {selectedStudentForInspect?.current_streak || 0} Days
+                      </Text>
+                    </View>
+                    <View style={[styles.formalMetricCell, styles.formalMetricCellLast]}>
+                      <Text style={styles.formalMetricLabel}>Practice Duration</Text>
+                      <Text style={styles.formalMetricValue}>
+                        {formatPracticeTime(selectedStudentForInspect?.total_time_spent_seconds)}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* 4. Full Lesson Competency Table */}
+                {(() => {
+                  const activeKcs = studentKcMastery.filter((k: any) => 
+                    !['kc_123', 'kc_test_title', 'kc_test_2', 'kc_sample', 'KC_SG_CHARACTER', 'KC_SG_SETTING', 'KC_SG_PROBLEM', 'KC_SG_RESOLUTION'].includes(k.kc_name)
+                  );
+                  return (
+                    <View style={styles.formalSectionBox}>
+                      <View style={styles.formalSectionBoxHeader}>
+                        <Text style={styles.formalSectionBoxTitle}>FULL LESSON COMPETENCY ASSESSMENT</Text>
+                      </View>
+                      <View style={styles.formalTable}>
+                        <View style={styles.formalTableHeaderRow}>
+                          <Text style={[styles.formalTableTh, { flex: 1.5 }]}>Subject</Text>
+                          <Text style={[styles.formalTableTh, { flex: 2 }]}>Lesson / Competency</Text>
+                          <Text style={[styles.formalTableTh, { flex: 1.5, textAlign: 'center' }]}>Mastery Status</Text>
+                          <Text style={[styles.formalTableTh, { flex: 1.5, textAlign: 'right' }]}>Items (Correct / Opp)</Text>
+                        </View>
+                        {activeKcs.length > 0 ? (
+                          activeKcs.map((kc: any, kIdx: number) => {
+                            const totalOpp = kc.total_opportunities || 0;
+                            const pMastery = kc.p_mastery ?? 0;
+                            let statusText = '[ UNTESTED ]';
+                            if (totalOpp > 0) {
+                              if (pMastery >= 0.70) statusText = '[ MASTERED ]';
+                              else if (pMastery >= 0.30) statusText = '[ DEVELOPING ]';
+                              else statusText = '[ NEEDS SUPPORT ]';
+                            }
+
+                            const topicName =
+                              kc.topic_id === 'story-grammar'
+                                ? 'Story Grammar'
+                                : kc.topic_id === 'mathematics'
+                                ? 'Mathematics'
+                                : kc.topic_id === 'technology-and-livelihood-education'
+                                ? 'TLE (ICT)'
+                                : kc.topic_id === 'araling-panlipunan'
+                                ? 'Araling Panlipunan'
+                                : (kc.topic_id || 'General');
+
+                            return (
+                              <View
+                                key={kc.kc_name || kIdx}
+                                style={[
+                                  styles.formalTableRow,
+                                  kIdx % 2 === 1 && styles.formalTableRowAlt,
+                                  kIdx === activeKcs.length - 1 && styles.formalTableRowLast,
+                                ]}
+                              >
+                                <Text style={[styles.formalTableTd, { flex: 1.5, fontWeight: '600' }]}>
+                                  {topicName}
+                                </Text>
+                                <Text style={[styles.formalTableTd, { flex: 2 }]}>
+                                  {kc.display_name || kc.kc_name}
+                                </Text>
+                                <Text style={[styles.formalTableTd, { flex: 1.5, textAlign: 'center', fontWeight: '700' }]}>
+                                  {statusText}
+                                </Text>
+                                <Text style={[styles.formalTableTd, { flex: 1.5, textAlign: 'right' }]}>
+                                  {kc.total_correct || 0} / {totalOpp} ({totalOpp > 0 ? Math.round(((kc.total_correct || 0) / totalOpp) * 100) : 0}%)
+                                </Text>
+                              </View>
+                            );
+                          })
+                        ) : (
+                          <View style={styles.formalTableRow}>
+                            <Text style={[styles.formalTableTd, { flex: 4, textAlign: 'center', fontStyle: 'italic' }]}>
+                              No competency records recorded for this student.
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })()}
+
+                {/* 5. Recent Chronological Quiz History Table */}
+                {(() => {
+                  const sortedAttempts = [...studentQuizAttempts].sort((a, b) => {
+                    const timeA = a.completed_at ? new Date(a.completed_at).getTime() : 0;
+                    const timeB = b.completed_at ? new Date(b.completed_at).getTime() : 0;
+                    return timeB - timeA;
+                  });
+
+                  return (
+                    <View style={styles.formalSectionBox}>
+                      <View style={styles.formalSectionBoxHeader}>
+                        <Text style={styles.formalSectionBoxTitle}>RECENT CHRONOLOGICAL QUIZ HISTORY</Text>
+                      </View>
+                      <View style={styles.formalTable}>
+                        <View style={styles.formalTableHeaderRow}>
+                          <Text style={[styles.formalTableTh, { flex: 1.5 }]}>Date Completed</Text>
+                          <Text style={[styles.formalTableTh, { flex: 2 }]}>Quiz Title</Text>
+                          <Text style={[styles.formalTableTh, { flex: 1, textAlign: 'center' }]}>Tier</Text>
+                          <Text style={[styles.formalTableTh, { flex: 1, textAlign: 'center' }]}>Score</Text>
+                          <Text style={[styles.formalTableTh, { flex: 1, textAlign: 'right' }]}>Accuracy</Text>
+                        </View>
+                        {sortedAttempts.length > 0 ? (
+                          sortedAttempts.map((att: any, aIdx: number) => {
+                            const dateStr = att.completed_at
+                              ? new Date(att.completed_at).toLocaleDateString('en-US', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  year: 'numeric',
+                                })
+                              : 'Completed';
+                            return (
+                              <View
+                                key={att.attempt_id || aIdx}
+                                style={[
+                                  styles.formalTableRow,
+                                  aIdx % 2 === 1 && styles.formalTableRowAlt,
+                                  aIdx === sortedAttempts.length - 1 && styles.formalTableRowLast,
+                                ]}
+                              >
+                                <Text style={[styles.formalTableTd, { flex: 1.5 }]}>{dateStr}</Text>
+                                <Text style={[styles.formalTableTd, { flex: 2, fontWeight: '600' }]}>
+                                  {att.quiz_title || 'Untitled Quiz'}
+                                </Text>
+                                <Text style={[styles.formalTableTd, { flex: 1, textAlign: 'center' }]}>
+                                  {(att.difficulty || 'Easy').toUpperCase()}
+                                </Text>
+                                <Text style={[styles.formalTableTd, { flex: 1, textAlign: 'center' }]}>
+                                  {att.score || 0} / {att.total_questions || 0}
+                                </Text>
+                                <Text style={[styles.formalTableTd, { flex: 1, textAlign: 'right', fontWeight: '700' }]}>
+                                  {Math.round(att.accuracy_pct || 0)}%
+                                </Text>
+                              </View>
+                            );
+                          })
+                        ) : (
+                          <View style={styles.formalTableRow}>
+                            <Text style={[styles.formalTableTd, { flex: 5, textAlign: 'center', fontStyle: 'italic' }]}>
+                              No quiz attempts recorded for this student.
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })()}
+
+                {/* 6. Strengths & Remedial Focus Recommendations */}
+                {(() => {
+                  const activeKcs = studentKcMastery.filter((k: any) => 
+                    !['kc_123', 'kc_test_title', 'kc_test_2', 'kc_sample', 'KC_SG_CHARACTER', 'KC_SG_SETTING', 'KC_SG_PROBLEM', 'KC_SG_RESOLUTION'].includes(k.kc_name)
+                  );
+                  const masteredKcs = activeKcs.filter((k: any) => (k.total_opportunities || 0) > 0 && (k.p_mastery ?? 0) >= 0.70);
+                  const remedialKcs = activeKcs.filter((k: any) => (k.total_opportunities || 0) > 0 && (k.p_mastery ?? 0) < 0.70);
+
+                  return (
+                    <View style={styles.formalSectionBox}>
+                      <View style={styles.formalSectionBoxHeader}>
+                        <Text style={styles.formalSectionBoxTitle}>PEDAGOGICAL ASSESSMENT &amp; RECOMMENDATIONS</Text>
+                      </View>
+                      <View style={styles.formalPedagogicalBody}>
+                        <Text style={styles.formalPedagogicalSubheading}>Demonstrated Strengths / Mastered Competencies:</Text>
+                        {masteredKcs.length > 0 ? (
+                          masteredKcs.map((m: any, mIdx: number) => (
+                            <Text key={mIdx} style={styles.formalPedagogicalItem}>
+                              • {m.display_name || m.kc_name} — Mastered (Retained proficiency across practice items)
+                            </Text>
+                          ))
+                        ) : (
+                          <Text style={styles.formalPedagogicalItemEmpty}>
+                            • Student is actively developing foundational skills across current curriculum competencies.
+                          </Text>
+                        )}
+
+                        <Text style={[styles.formalPedagogicalSubheading, { marginTop: 12 }]}>
+                          Priority Remedial Focus / Required Review:
+                        </Text>
+                        {remedialKcs.length > 0 ? (
+                          remedialKcs.map((r: any, rIdx: number) => (
+                            <Text key={rIdx} style={styles.formalPedagogicalItem}>
+                              • {r.display_name || r.kc_name} — Prioritize remedial drills and targeted teacher assistance
+                            </Text>
+                          ))
+                        ) : (
+                          <Text style={styles.formalPedagogicalItemEmpty}>
+                            • No remedial flags detected. Student has attained required mastery thresholds on all attempted competencies.
+                          </Text>
+                        )}
+
+                        <Text style={[styles.formalPedagogicalSubheading, { marginTop: 12 }]}>
+                          Adviser Action Note:
+                        </Text>
+                        <Text style={styles.formalPedagogicalItem}>
+                          {remedialKcs.length > 0
+                            ? 'Recommended Action: Prioritize guided 1-on-1 visual support and supplementary quiz exercises for flagged competencies prior to advancing to higher difficulty tiers.'
+                            : 'Recommended Action: Continue current practice cadence and provide enrichment learning opportunities at advanced difficulty tiers.'}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })()}
+
+                {/* 7. Signatures: Teacher & Parent/Guardian */}
+                <View style={styles.formalSignatureBlock}>
+                  <View style={styles.formalSignatureCol}>
+                    <Text style={styles.formalSignatureRole}>Teacher Signature:</Text>
+                    <View style={styles.formalSignatureLine} />
+                    <Text style={styles.formalSignatureSigner}>{user?.name || user?.username || 'Class Adviser'}</Text>
+                    <Text style={styles.formalSignatureTitle}>Class Adviser / Teacher</Text>
+                    <Text style={styles.formalSignatureDate}>Date: ________________________</Text>
+                  </View>
+
+                  <View style={styles.formalSignatureCol}>
+                    <Text style={styles.formalSignatureRole}>Parent / Guardian Signature:</Text>
+                    <View style={styles.formalSignatureLine} />
+                    <Text style={styles.formalSignatureSigner}>____________________________</Text>
+                    <Text style={styles.formalSignatureTitle}>Parent / Legal Guardian</Text>
+                    <Text style={styles.formalSignatureDate}>Date: ________________________</Text>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -5277,64 +6017,181 @@ const styles = StyleSheet.create({
     marginTop: 2,
     textAlign: 'center',
   },
+  kcCardGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+  },
   kcCard: {
+    flexBasis: '48%',
+    flexGrow: 1,
+    minWidth: 300,
     backgroundColor: '#FFFFFF',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    padding: 14,
-    marginBottom: 8,
+    borderRadius: 14,
+    borderWidth: 1.8,
+    borderColor: '#CBD5E1',
+    overflow: 'hidden',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  kcCardBody: {
+    padding: 16,
   },
   kcCardHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 12,
+  },
+  kcIconTile: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   kcTitle: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 15.5,
+    fontWeight: '800',
     color: '#0F172A',
-  },
-  kcTopic: {
-    fontSize: 11.5,
-    color: '#64748B',
-    marginTop: 2,
+    lineHeight: 21,
   },
   kcStatusPill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 20,
+    borderWidth: 1,
   },
   kcStatusPillText: {
     fontSize: 11,
     fontWeight: '700',
   },
-  kcProgressBarTrack: {
-    height: 8,
-    backgroundColor: '#E2E8F0',
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 8,
+  kcGaugeSection: {
+    marginTop: 2,
   },
-  kcProgressBarFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  kcFooterRow: {
+  kcMasteryRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    flexWrap: 'wrap',
-    gap: 6,
+    marginBottom: 6,
   },
-  kcMasteryPercent: {
+  kcMasteryLabel: {
     fontSize: 12,
-    color: '#334155',
-  },
-  kcCountsText: {
-    fontSize: 11,
+    fontWeight: '600',
     color: '#64748B',
+  },
+  kcMasteryNumber: {
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  kcActionTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  kcActionTagText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+  kcProgressBarTrack: {
+    height: 9,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 5,
+    overflow: 'hidden',
+  },
+  kcProgressBarFill: {
+    height: '100%',
+    borderRadius: 5,
+  },
+  kcUntestedBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginTop: 4,
+  },
+  kcUntestedText: {
+    fontSize: 12,
+    color: '#64748B',
+    fontWeight: '500',
+  },
+  kcCardFooterTray: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  kcFooterStatsLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  kcStatBadgeGreen: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  kcStatBadgeGreenText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  kcStatBadgeRed: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#FEF2F2',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  kcStatBadgeRedText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#DC2626',
+  },
+  kcFooterTotalText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  kcFooterUntestedText: {
+    fontSize: 11.5,
+    color: '#94A3B8',
+    fontStyle: 'italic',
+  },
+  kcFooterUntestedBadge: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    backgroundColor: '#EEF2F6',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
   },
   badgesSummaryBanner: {
     flexDirection: 'row',
@@ -5721,8 +6578,8 @@ const styles = StyleSheet.create({
   curriculumStoryCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderWidth: 1.8,
+    borderColor: '#CBD5E1',
     marginBottom: 14,
     overflow: 'hidden',
     shadowColor: '#0F172A',
@@ -6635,5 +7492,372 @@ const styles = StyleSheet.create({
     height: 28,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // ─── Formal Printable Document Styles (Pure Black and White, Academic DepEd Standard) ───
+  reportModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  reportModalContainer: {
+    width: '100%',
+    maxWidth: 960,
+    maxHeight: '92%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    overflow: 'hidden',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 25,
+    elevation: 20,
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  reportModalTopBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    backgroundColor: '#0F172A',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+  },
+  reportModalTopTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  reportModalTopSubtitle: {
+    fontSize: 12,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  reportModalActionPrintBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#2563EB',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  reportModalActionPrintBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  reportModalActionCloseBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: '#334155',
+    borderRadius: 8,
+  },
+  reportModalActionCloseBtnText: {
+    color: '#F1F5F9',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  reportScrollContainer: {
+    flex: 1,
+    backgroundColor: '#E2E8F0',
+  },
+  reportScrollContent: {
+    padding: 24,
+    alignItems: 'center',
+  },
+  reportPaper: {
+    width: '100%',
+    maxWidth: 820,
+    backgroundColor: '#FFFFFF',
+    padding: 36,
+    borderWidth: 1.5,
+    borderColor: '#000000',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  formalDocHeader: {
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  formalDocSchoolName: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#000000',
+    letterSpacing: 1.2,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  formalDocTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#000000',
+    marginTop: 4,
+    letterSpacing: 0.8,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  formalDocMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginTop: 14,
+    paddingTop: 6,
+  },
+  formalDocMetaText: {
+    fontSize: 12,
+    color: '#000000',
+    fontWeight: '600',
+  },
+  formalDocDividerThick: {
+    height: 2,
+    backgroundColor: '#000000',
+    marginVertical: 12,
+  },
+  formalSectionBox: {
+    borderWidth: 1.2,
+    borderColor: '#000000',
+    marginBottom: 16,
+    backgroundColor: '#FFFFFF',
+  },
+  formalSectionBoxHeader: {
+    backgroundColor: '#F5F5F5',
+    borderBottomWidth: 1.2,
+    borderBottomColor: '#000000',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  formalSectionBoxTitle: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    color: '#000000',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  formalOverviewGrid: {
+    flexDirection: 'row',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  formalOverviewItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  formalOverviewDivider: {
+    width: 1.2,
+    height: 40,
+    backgroundColor: '#000000',
+  },
+  formalOverviewLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  formalOverviewValue: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#000000',
+  },
+  formalSectionNote: {
+    fontSize: 11.5,
+    color: '#000000',
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 4,
+    fontStyle: 'italic',
+  },
+  formalTable: {
+    width: '100%',
+  },
+  formalTableHeaderRow: {
+    flexDirection: 'row',
+    backgroundColor: '#F5F5F5',
+    borderBottomWidth: 1.2,
+    borderBottomColor: '#000000',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  formalTableTh: {
+    fontSize: 11.5,
+    fontWeight: '800',
+    color: '#000000',
+    textTransform: 'uppercase',
+  },
+  formalTableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E0E0E0',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  formalTableRowAlt: {
+    backgroundColor: '#FAFAFA',
+  },
+  formalTableRowLast: {
+    borderBottomWidth: 0,
+  },
+  formalTableTd: {
+    fontSize: 12,
+    color: '#000000',
+  },
+  formalEmptyNoticeBox: {
+    padding: 14,
+    alignItems: 'center',
+  },
+  formalEmptyNoticeText: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#000000',
+    textAlign: 'center',
+  },
+  formalStudentProfileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    gap: 8,
+  },
+  formalStudentProfileLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#000000',
+  },
+  formalStudentProfileValue: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#000000',
+    letterSpacing: 0.5,
+  },
+  formalMetricsGrid: {
+    flexDirection: 'row',
+  },
+  formalMetricCell: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    borderRightWidth: 1.2,
+    borderRightColor: '#000000',
+  },
+  formalMetricCellLast: {
+    borderRightWidth: 0,
+  },
+  formalMetricLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#000000',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  formalMetricValue: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#000000',
+    textAlign: 'center',
+  },
+  formalPedagogicalBody: {
+    padding: 14,
+  },
+  formalPedagogicalSubheading: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#000000',
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  formalPedagogicalItem: {
+    fontSize: 11.5,
+    color: '#000000',
+    lineHeight: 18,
+    marginLeft: 6,
+  },
+  formalPedagogicalItemEmpty: {
+    fontSize: 11.5,
+    fontStyle: 'italic',
+    color: '#333333',
+    lineHeight: 18,
+    marginLeft: 6,
+  },
+  formalSignatureBlock: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 28,
+    paddingTop: 12,
+  },
+  formalSignatureCol: {
+    width: '45%',
+  },
+  formalSignatureRole: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#000000',
+    marginBottom: 36,
+  },
+  formalSignatureLine: {
+    height: 1.2,
+    backgroundColor: '#000000',
+    marginBottom: 6,
+  },
+  formalSignatureSigner: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    color: '#000000',
+  },
+  formalSignatureTitle: {
+    fontSize: 11,
+    color: '#000000',
+    marginTop: 2,
+  },
+  formalSignatureDate: {
+    fontSize: 11,
+    color: '#000000',
+    marginTop: 6,
+  },
+
+  // ─── Directory & Dossier Action Buttons (in Teacher UI) ───
+  reportButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  reportExportCsvBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  reportExportCsvBtnText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  reportPrintBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    backgroundColor: '#1E293B',
+    borderRadius: 8,
+  },
+  reportPrintBtnText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });

@@ -312,7 +312,7 @@ export function getWrongAnswerScaffold(
     return {
       kcDisplayName: def.displayName,
       reasonEn: `${customTeacherHint.trim()} '${selectedOptionText}' is not the correct answer.`,
-      reasonAsl: `HINT: ${customTeacherHint.trim().toUpperCase()}. '${selectedOptionText.toUpperCase()}' WRONG.`,
+      reasonAsl: `${customTeacherHint.trim().toUpperCase()}. '${selectedOptionText.toUpperCase()}' WRONG.`,
       correctAnswerText: correctOptionText,
       tier: 1,
     };
