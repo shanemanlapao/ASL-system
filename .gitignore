@@ -67,4 +67,11 @@ render_*.py
 deploy_azure.ps1
 *.zip
 scratch/
+assets/uploads/
+assets/uploads/**
+evaluation/
+*.docx
+*.csv
+*.html
+
 

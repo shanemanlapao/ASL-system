@@ -7,6 +7,11 @@ deploy.zip
 *.zip
 scratch/
 assets/uploads/
+assets/uploads/**
+evaluation/
+*.docx
+*.csv
+*.html
 server.py
 requirements.txt
 __pycache__/
